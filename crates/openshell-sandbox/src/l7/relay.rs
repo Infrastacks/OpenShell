@@ -11,6 +11,7 @@ use crate::l7::provider::L7Provider;
 use crate::l7::{EnforcementMode, L7EndpointConfig, L7Protocol, L7RequestInfo};
 use crate::secrets::SecretResolver;
 use miette::{IntoDiagnostic, Result, miette};
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tracing::{debug, info, warn};
@@ -35,6 +36,8 @@ pub struct L7EvalContext {
     pub pii_engine: Option<openshell_pii::PiiEngine>,
     /// Supply chain engine (None = supply chain scanning disabled).
     pub supply_chain_engine: Option<openshell_supply_chain::SupplyChainEngine>,
+    /// Path to events.jsonl for emitting telemetry events (shared with PII proxy + agent tailer).
+    pub events_path: Option<PathBuf>,
 }
 
 /// Run protocol-aware L7 inspection on a tunnel.
@@ -125,6 +128,49 @@ where
                     vuln_high = result.vuln_counts.high,
                     "PACKAGE_INSTALL"
                 );
+
+                // Emit events.jsonl for agent telemetry pipeline
+                if let Some(ref events_path) = ctx.events_path {
+                    let event_type = if result.decision == openshell_supply_chain::Decision::Deny {
+                        "package.blocked"
+                    } else {
+                        "package.install"
+                    };
+                    let decision_str = match result.decision {
+                        openshell_supply_chain::Decision::Allow => "allow",
+                        openshell_supply_chain::Decision::Audit => "audit",
+                        openshell_supply_chain::Decision::Deny => "deny",
+                    };
+                    let license_status = match result.license_status {
+                        openshell_supply_chain::LicenseStatus::Allowed => "allowed",
+                        openshell_supply_chain::LicenseStatus::Denied => "denied",
+                        openshell_supply_chain::LicenseStatus::Unknown => "unknown",
+                    };
+                    let now = crate::l7::utc_now_rfc3339();
+                    let event = serde_json::json!({
+                        "eventType": event_type,
+                        "timestamp": now,
+                        "data": {
+                            "ecosystem": registry_match.ecosystem,
+                            "packageName": registry_match.package,
+                            "version": registry_match.version,
+                            "decision": decision_str,
+                            "vulnCountCritical": result.vuln_counts.critical,
+                            "vulnCountHigh": result.vuln_counts.high,
+                            "licenseStatus": license_status,
+                            "denialReason": result.denial_reason.as_deref().unwrap_or(""),
+                        }
+                    });
+                    if let Ok(mut f) = std::fs::OpenOptions::new()
+                        .create(true)
+                        .append(true)
+                        .open(events_path)
+                    {
+                        use std::io::Write;
+                        let _ = writeln!(f, "{}", event);
+                    }
+                }
+
                 if result.decision == openshell_supply_chain::Decision::Deny {
                     let reason = result.denial_reason.unwrap_or_default();
                     crate::l7::rest::RestProvider

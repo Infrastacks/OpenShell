@@ -558,7 +558,40 @@ async fn handle_tcp_connection(
                 let policy = pii_policy_from_def(&def);
                 openshell_pii::PiiEngine::new(&policy)
             }),
-            supply_chain_engine: None,   // TODO: construct from policy YAML supply_chain section
+            supply_chain_engine: {
+                let sc_path = std::env::var("SUPPLY_CHAIN_POLICY_PATH")
+                    .unwrap_or_else(|_| "/sandbox/.nemoclaw/supply-chain-policy.yaml".into());
+                let sc_path = std::path::Path::new(&sc_path);
+                if sc_path.exists() {
+                    match std::fs::read_to_string(sc_path) {
+                        Ok(yaml) => match openshell_policy::parse_supply_chain_policy(&yaml) {
+                            Ok(Some(def)) => {
+                                let policy = supply_chain_policy_from_def(&def);
+                                Some(openshell_supply_chain::SupplyChainEngine::new(&policy))
+                            }
+                            Ok(None) => {
+                                tracing::debug!("No supply_chain section in policy YAML");
+                                None
+                            }
+                            Err(e) => {
+                                tracing::warn!(error = %e, "Failed to parse supply chain policy");
+                                None
+                            }
+                        },
+                        Err(e) => {
+                            tracing::warn!(path = %sc_path.display(), error = %e, "Failed to read supply chain policy");
+                            None
+                        }
+                    }
+                } else {
+                    None
+                }
+            },
+            events_path: {
+                let p = std::env::var("OPENSHELL_EVENTS_PATH")
+                    .unwrap_or_else(|_| "/sandbox/.nemoclaw/events.jsonl".into());
+                Some(PathBuf::from(p))
+            },
         };
 
         if l7_config.tls == crate::l7::TlsMode::Terminate {
@@ -1906,6 +1939,44 @@ fn pii_policy_from_def(def: &openshell_policy::PiiPolicyDef) -> openshell_pii::P
         ner_endpoint: def.ner_endpoint.clone(),
         ner_min_confidence: def.ner_min_confidence as f32,
         ner_async: def.ner_async,
+    }
+}
+
+/// Convert a parsed `SupplyChainPolicyDef` (YAML types) into an
+/// `openshell_supply_chain::SupplyChainPolicy` (runtime types).
+fn supply_chain_policy_from_def(
+    def: &openshell_policy::SupplyChainPolicyDef,
+) -> openshell_supply_chain::SupplyChainPolicy {
+    openshell_supply_chain::SupplyChainPolicy {
+        enforcement: def.enforcement.clone(),
+        vulnerability_thresholds: openshell_supply_chain::VulnThresholds {
+            max_critical: def.vulnerability_thresholds.max_critical,
+            max_high: def.vulnerability_thresholds.max_high,
+            block_unfixed_critical: def.vulnerability_thresholds.block_unfixed_critical,
+        },
+        license_policy: openshell_supply_chain::LicensePolicy {
+            allowed: def.license_policy.allowed.clone(),
+            denied: def.license_policy.denied.clone(),
+        },
+        denylist: def
+            .denylist
+            .iter()
+            .map(|d| openshell_supply_chain::DenylistEntry {
+                package: d.package.clone(),
+                ecosystem: d.ecosystem.clone(),
+                reason: d.reason.clone(),
+            })
+            .collect(),
+        version_pinning: def
+            .version_pinning
+            .iter()
+            .map(|v| openshell_supply_chain::VersionPin {
+                package: v.package.clone(),
+                ecosystem: v.ecosystem.clone(),
+                range: v.range.clone(),
+            })
+            .collect(),
+        osv_cache_ttl_hours: def.osv_cache_ttl_hours,
     }
 }
 
