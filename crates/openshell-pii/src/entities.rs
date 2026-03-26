@@ -9,9 +9,15 @@ use std::fmt;
 use std::sync::LazyLock;
 
 /// Supported PII entity types.
+///
+/// Variants fall into two categories:
+/// - **Regex-detected**: Have compiled patterns in `builtin_patterns()` (Ssn through Passport).
+/// - **NER-only**: Detected by the ML-based NER service (Person through NationalId).
+///   These have no regex patterns and require the `ner` feature and a running NER service.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EntityType {
+    // -- Regex-detected entity types --
     Ssn,
     CreditCard,
     Email,
@@ -22,6 +28,14 @@ pub enum EntityType {
     Jwt,
     ApiKey,
     Passport,
+    // -- NER-only entity types (no regex pattern) --
+    Person,
+    Organization,
+    Address,
+    DateOfBirth,
+    MedicalTerm,
+    Location,
+    NationalId,
 }
 
 impl fmt::Display for EntityType {
@@ -37,6 +51,13 @@ impl fmt::Display for EntityType {
             Self::Jwt => write!(f, "jwt"),
             Self::ApiKey => write!(f, "api_key"),
             Self::Passport => write!(f, "passport"),
+            Self::Person => write!(f, "person"),
+            Self::Organization => write!(f, "organization"),
+            Self::Address => write!(f, "address"),
+            Self::DateOfBirth => write!(f, "date_of_birth"),
+            Self::MedicalTerm => write!(f, "medical_term"),
+            Self::Location => write!(f, "location"),
+            Self::NationalId => write!(f, "national_id"),
         }
     }
 }
@@ -55,8 +76,30 @@ impl EntityType {
             "jwt" => Some(Self::Jwt),
             "api_key" => Some(Self::ApiKey),
             "passport" => Some(Self::Passport),
+            "person" => Some(Self::Person),
+            "organization" | "org" => Some(Self::Organization),
+            "address" => Some(Self::Address),
+            "date_of_birth" | "dob" => Some(Self::DateOfBirth),
+            "medical_term" | "medical" => Some(Self::MedicalTerm),
+            "location" | "loc" | "gpe" => Some(Self::Location),
+            "national_id" => Some(Self::NationalId),
             _ => None,
         }
+    }
+
+    /// Returns `true` for entity types that can only be detected by a NER model,
+    /// not by regex patterns.
+    pub fn is_ner_only(&self) -> bool {
+        matches!(
+            self,
+            Self::Person
+                | Self::Organization
+                | Self::Address
+                | Self::DateOfBirth
+                | Self::MedicalTerm
+                | Self::Location
+                | Self::NationalId
+        )
     }
 }
 
@@ -322,5 +365,51 @@ mod tests {
     #[test]
     fn passport_rejects_lowercase() {
         assert!(!RE_PASSPORT.is_match("ab1234567"));
+    }
+
+    // ---- NER entity types ----
+    #[test]
+    fn ner_entity_types_parse() {
+        assert_eq!(EntityType::parse("person"), Some(EntityType::Person));
+        assert_eq!(EntityType::parse("organization"), Some(EntityType::Organization));
+        assert_eq!(EntityType::parse("org"), Some(EntityType::Organization));
+        assert_eq!(EntityType::parse("address"), Some(EntityType::Address));
+        assert_eq!(EntityType::parse("date_of_birth"), Some(EntityType::DateOfBirth));
+        assert_eq!(EntityType::parse("dob"), Some(EntityType::DateOfBirth));
+        assert_eq!(EntityType::parse("medical_term"), Some(EntityType::MedicalTerm));
+        assert_eq!(EntityType::parse("medical"), Some(EntityType::MedicalTerm));
+        assert_eq!(EntityType::parse("location"), Some(EntityType::Location));
+        assert_eq!(EntityType::parse("loc"), Some(EntityType::Location));
+        assert_eq!(EntityType::parse("gpe"), Some(EntityType::Location));
+        assert_eq!(EntityType::parse("national_id"), Some(EntityType::NationalId));
+    }
+
+    #[test]
+    fn ner_entity_types_display() {
+        assert_eq!(EntityType::Person.to_string(), "person");
+        assert_eq!(EntityType::Organization.to_string(), "organization");
+        assert_eq!(EntityType::Address.to_string(), "address");
+        assert_eq!(EntityType::DateOfBirth.to_string(), "date_of_birth");
+        assert_eq!(EntityType::MedicalTerm.to_string(), "medical_term");
+        assert_eq!(EntityType::Location.to_string(), "location");
+        assert_eq!(EntityType::NationalId.to_string(), "national_id");
+    }
+
+    #[test]
+    fn is_ner_only_discriminator() {
+        // Regex-detected types should return false.
+        assert!(!EntityType::Ssn.is_ner_only());
+        assert!(!EntityType::CreditCard.is_ner_only());
+        assert!(!EntityType::Email.is_ner_only());
+        assert!(!EntityType::ApiKey.is_ner_only());
+
+        // NER-only types should return true.
+        assert!(EntityType::Person.is_ner_only());
+        assert!(EntityType::Organization.is_ner_only());
+        assert!(EntityType::Address.is_ner_only());
+        assert!(EntityType::DateOfBirth.is_ner_only());
+        assert!(EntityType::MedicalTerm.is_ner_only());
+        assert!(EntityType::Location.is_ner_only());
+        assert!(EntityType::NationalId.is_ner_only());
     }
 }

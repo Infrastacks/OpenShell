@@ -2887,7 +2887,10 @@ name = "openshell-pii"
 version = "0.0.0"
 dependencies = [
  "regex",
+ "reqwest",
  "serde",
+ "serde_json",
+ "tokio",
  "tracing",
 ]
 

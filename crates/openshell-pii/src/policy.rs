@@ -45,10 +45,26 @@ pub struct PiiPolicy {
     /// Custom regex patterns.
     #[serde(default)]
     pub custom_patterns: Vec<CustomPattern>,
+    /// Cluster-internal NER service endpoint (e.g. `http://codicera-ner:8080`).
+    /// When `Some`, the NER service is called for Tier 2 detection.
+    #[serde(default)]
+    pub ner_endpoint: Option<String>,
+    /// Minimum confidence threshold for NER detections (0.0–1.0).
+    #[serde(default = "default_ner_min_confidence")]
+    pub ner_min_confidence: f32,
+    /// When `true`, NER runs asynchronously (detect-and-log) instead of inline
+    /// (detect-and-block/redact). Use async for audit/warn policies where latency
+    /// matters more than inline enforcement.
+    #[serde(default)]
+    pub ner_async: bool,
 }
 
 fn default_max_body_bytes() -> usize {
     1_048_576 // 1 MiB
+}
+
+fn default_ner_min_confidence() -> f32 {
+    0.7
 }
 
 impl Default for PiiPolicy {
@@ -58,6 +74,9 @@ impl Default for PiiPolicy {
             max_body_bytes: default_max_body_bytes(),
             entities: HashMap::new(),
             custom_patterns: Vec::new(),
+            ner_endpoint: None,
+            ner_min_confidence: default_ner_min_confidence(),
+            ner_async: false,
         }
     }
 }
@@ -72,6 +91,11 @@ impl PiiPolicy {
                 _ => PiiAction::Audit,
             }
         })
+    }
+
+    /// Returns `true` if a NER service endpoint is configured.
+    pub fn ner_enabled(&self) -> bool {
+        self.ner_endpoint.is_some()
     }
 }
 

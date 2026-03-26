@@ -125,6 +125,48 @@ impl PiiEngine {
         detections
     }
 
+    /// Returns a reference to the policy driving this engine.
+    pub fn policy(&self) -> &PiiPolicy {
+        &self.policy
+    }
+
+    /// Detect PII using both regex (Tier 1) and NER (Tier 2).
+    ///
+    /// Runs regex detection first, then calls the NER service for entity types
+    /// that regex cannot detect (names, addresses, medical terms). Results are
+    /// merged with overlapping spans deduplicated (higher confidence wins).
+    #[cfg(feature = "ner")]
+    pub async fn detect_with_ner(
+        &self,
+        body: &[u8],
+        ner_client: &mut crate::ner_client::NerClient,
+    ) -> Vec<PiiDetection> {
+        // Tier 1: regex detection (always runs).
+        let regex_detections = self.detect(body);
+
+        // Tier 2: NER detection (requires valid UTF-8 text).
+        let text = match std::str::from_utf8(body) {
+            Ok(s) if !s.is_empty() => s,
+            _ => return regex_detections,
+        };
+
+        let ner_detections = ner_client
+            .detect(text, self.policy.ner_min_confidence)
+            .await;
+
+        if ner_detections.is_empty() {
+            return regex_detections;
+        }
+
+        debug!(
+            regex_count = regex_detections.len(),
+            ner_count = ner_detections.len(),
+            "Merging Tier 1 (regex) + Tier 2 (NER) detections"
+        );
+
+        merge_detections(regex_detections, ner_detections)
+    }
+
     /// Detect and apply the policy to a mutable body buffer.
     ///
     /// Returns the enforcement result: clean, audited, redacted, or blocked.
@@ -164,6 +206,43 @@ impl PiiEngine {
     }
 }
 
+/// Merge regex and NER detections, deduplicating overlapping spans.
+///
+/// When two detections overlap in byte range, the one with higher confidence is
+/// kept. Non-overlapping detections from both tiers are preserved as-is.
+pub fn merge_detections(
+    mut regex: Vec<PiiDetection>,
+    ner: Vec<PiiDetection>,
+) -> Vec<PiiDetection> {
+    for ner_det in ner {
+        let overlaps = regex.iter().any(|r| spans_overlap(&r.span, &ner_det.span));
+        if overlaps {
+            // Replace overlapping regex detection only if NER has higher confidence.
+            let mut replaced = false;
+            for existing in regex.iter_mut() {
+                if spans_overlap(&existing.span, &ner_det.span)
+                    && ner_det.confidence > existing.confidence
+                {
+                    *existing = ner_det.clone();
+                    replaced = true;
+                    break;
+                }
+            }
+            if !replaced {
+                // Regex detection had equal or higher confidence — keep it.
+            }
+        } else {
+            regex.push(ner_det);
+        }
+    }
+    regex
+}
+
+/// Check if two byte ranges overlap.
+fn spans_overlap(a: &std::ops::Range<usize>, b: &std::ops::Range<usize>) -> bool {
+    a.start < b.end && b.start < a.end
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,9 +251,7 @@ mod tests {
     fn audit_policy() -> PiiPolicy {
         PiiPolicy {
             enforcement: "audit".to_string(),
-            max_body_bytes: 1_048_576,
-            entities: HashMap::new(),
-            custom_patterns: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -184,9 +261,8 @@ mod tests {
         entities.insert(EntityType::CreditCard, PiiAction::Redact);
         PiiPolicy {
             enforcement: "redact".to_string(),
-            max_body_bytes: 1_048_576,
             entities,
-            custom_patterns: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -196,9 +272,8 @@ mod tests {
         entities.insert(EntityType::Ssn, PiiAction::Audit);
         PiiPolicy {
             enforcement: "block".to_string(),
-            max_body_bytes: 1_048_576,
             entities,
-            custom_patterns: Vec::new(),
+            ..Default::default()
         }
     }
 
@@ -328,5 +403,80 @@ mod tests {
         let body = b"Employee CORP-12345678 logged in";
         let detections = engine.detect(body);
         assert!(!detections.is_empty());
+    }
+
+    // ---- merge_detections ----
+
+    fn make_detection(entity: EntityType, start: usize, end: usize, conf: f32) -> PiiDetection {
+        PiiDetection {
+            entity_type: entity,
+            span: start..end,
+            matched_text: String::new(),
+            confidence: conf,
+        }
+    }
+
+    #[test]
+    fn merge_non_overlapping_keeps_both() {
+        let regex = vec![make_detection(EntityType::Ssn, 0, 11, 0.9)];
+        let ner = vec![make_detection(EntityType::Person, 20, 30, 0.95)];
+        let merged = merge_detections(regex, ner);
+        assert_eq!(merged.len(), 2);
+        assert!(merged.iter().any(|d| d.entity_type == EntityType::Ssn));
+        assert!(merged.iter().any(|d| d.entity_type == EntityType::Person));
+    }
+
+    #[test]
+    fn merge_overlapping_higher_confidence_wins() {
+        // Regex found something at 5..15 with confidence 0.5
+        let regex = vec![make_detection(EntityType::Passport, 5, 15, 0.5)];
+        // NER found a person name at 5..12 with confidence 0.95
+        let ner = vec![make_detection(EntityType::Person, 5, 12, 0.95)];
+        let merged = merge_detections(regex, ner);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].entity_type, EntityType::Person);
+        assert_eq!(merged[0].confidence, 0.95);
+    }
+
+    #[test]
+    fn merge_overlapping_regex_higher_confidence_kept() {
+        // Regex found credit card at 0..16 with confidence 0.95
+        let regex = vec![make_detection(EntityType::CreditCard, 0, 16, 0.95)];
+        // NER found national_id at 0..16 with confidence 0.6
+        let ner = vec![make_detection(EntityType::NationalId, 0, 16, 0.6)];
+        let merged = merge_detections(regex, ner);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].entity_type, EntityType::CreditCard);
+    }
+
+    #[test]
+    fn merge_empty_ner_returns_regex() {
+        let regex = vec![make_detection(EntityType::Email, 0, 20, 0.95)];
+        let merged = merge_detections(regex, Vec::new());
+        assert_eq!(merged.len(), 1);
+    }
+
+    #[test]
+    fn merge_empty_regex_returns_ner() {
+        let ner = vec![make_detection(EntityType::Person, 0, 10, 0.9)];
+        let merged = merge_detections(Vec::new(), ner);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].entity_type, EntityType::Person);
+    }
+
+    #[test]
+    fn spans_overlap_cases() {
+        assert!(spans_overlap(&(0..10), &(5..15)));
+        assert!(spans_overlap(&(5..15), &(0..10)));
+        assert!(spans_overlap(&(0..10), &(0..10)));
+        assert!(!spans_overlap(&(0..10), &(10..20)));
+        assert!(!spans_overlap(&(10..20), &(0..10)));
+    }
+
+    #[test]
+    fn policy_accessor() {
+        let engine = PiiEngine::new(&audit_policy());
+        assert_eq!(engine.policy().enforcement, "audit");
+        assert!(!engine.policy().ner_enabled());
     }
 }

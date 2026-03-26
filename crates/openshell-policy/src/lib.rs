@@ -62,6 +62,15 @@ pub struct PiiPolicyDef {
     /// Custom regex patterns for org-specific PII.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_patterns: Vec<PiiCustomPatternDef>,
+    /// Cluster-internal NER service endpoint (e.g. `http://codicera-ner:8080`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ner_endpoint: Option<String>,
+    /// Minimum confidence for NER detections (0.0–1.0, default 0.7).
+    #[serde(default = "default_ner_min_confidence")]
+    pub ner_min_confidence: f64,
+    /// Run NER asynchronously (detect-and-log, no blocking).
+    #[serde(default)]
+    pub ner_async: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -79,6 +88,10 @@ fn default_audit() -> String {
 
 fn default_max_body_bytes() -> usize {
     1_048_576
+}
+
+fn default_ner_min_confidence() -> f64 {
+    0.7
 }
 
 // ---------------------------------------------------------------------------

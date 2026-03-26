@@ -163,21 +163,78 @@ where
         );
 
         if allowed || config.enforcement == EnforcementMode::Audit {
-            // Forward request to upstream and relay response
-            let reusable = crate::l7::rest::relay_http_request_with_resolver(
-                &req,
-                client,
-                upstream,
-                ctx.secret_resolver.as_deref(),
-            )
-            .await?;
-            if !reusable {
-                debug!(
-                    host = %ctx.host,
-                    port = ctx.port,
-                    "Upstream connection not reusable, closing L7 relay"
-                );
-                return Ok(());
+            // --- PII scan on request body (Tier 1: regex) ---
+            if let Some(ref pii_engine) = ctx.pii_engine {
+                let pii_result = crate::l7::rest::relay_http_request_with_pii(
+                    &req,
+                    client,
+                    upstream,
+                    ctx.secret_resolver.as_deref(),
+                    pii_engine,
+                )
+                .await?;
+
+                match &pii_result {
+                    crate::l7::rest::PiiRelayResult::Blocked => {
+                        info!(
+                            dst_host = %ctx.host,
+                            dst_port = ctx.port,
+                            policy = %ctx.policy_name,
+                            engine = "pii",
+                            pii_action = "block",
+                            "PII_DETECTION"
+                        );
+                        crate::l7::rest::RestProvider
+                            .deny(
+                                &req,
+                                &ctx.policy_name,
+                                "Request blocked: PII detected in body",
+                                client,
+                            )
+                            .await?;
+                        return Ok(());
+                    }
+                    crate::l7::rest::PiiRelayResult::Redacted(count) => {
+                        info!(
+                            dst_host = %ctx.host,
+                            dst_port = ctx.port,
+                            policy = %ctx.policy_name,
+                            engine = "pii",
+                            pii_action = "redact",
+                            pii_redaction_count = count,
+                            "PII_DETECTION"
+                        );
+                    }
+                    crate::l7::rest::PiiRelayResult::Audited(count) => {
+                        info!(
+                            dst_host = %ctx.host,
+                            dst_port = ctx.port,
+                            policy = %ctx.policy_name,
+                            engine = "pii",
+                            pii_action = "audit",
+                            pii_entities_found = count,
+                            "PII_DETECTION"
+                        );
+                    }
+                    crate::l7::rest::PiiRelayResult::Clean => {}
+                }
+            } else {
+                // No PII engine — relay without scanning.
+                let reusable = crate::l7::rest::relay_http_request_with_resolver(
+                    &req,
+                    client,
+                    upstream,
+                    ctx.secret_resolver.as_deref(),
+                )
+                .await?;
+                if !reusable {
+                    debug!(
+                        host = %ctx.host,
+                        port = ctx.port,
+                        "Upstream connection not reusable, closing L7 relay"
+                    );
+                    return Ok(());
+                }
             }
         } else {
             // Enforce mode: deny with 403 and close connection

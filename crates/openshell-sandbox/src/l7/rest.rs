@@ -171,6 +171,140 @@ where
     relay_response(&req.action, upstream, client).await
 }
 
+/// Relay an HTTP request with PII body scanning.
+///
+/// For requests with a `Content-Length` body: buffers the body, runs PII
+/// detection and enforcement, then forwards the (possibly modified) body to
+/// upstream. Returns `PiiRelayResult` describing the action taken.
+///
+/// For chunked or bodyless requests, PII scanning is skipped (the body is
+/// either unbounded or absent). Use `relay_http_request_with_resolver()` for
+/// these cases.
+pub(crate) async fn relay_http_request_with_pii<C, U>(
+    req: &L7Request,
+    client: &mut C,
+    upstream: &mut U,
+    resolver: Option<&crate::secrets::SecretResolver>,
+    pii_engine: &openshell_pii::PiiEngine,
+) -> Result<PiiRelayResult>
+where
+    C: AsyncRead + AsyncWrite + Unpin,
+    U: AsyncRead + AsyncWrite + Unpin,
+{
+    use crate::secrets::rewrite_http_header_block;
+    use openshell_pii::PiiApplyResult;
+
+    let header_end = req
+        .raw_header
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map_or(req.raw_header.len(), |p| p + 4);
+
+    let overflow = &req.raw_header[header_end..];
+    let overflow_len = overflow.len() as u64;
+
+    // Only buffer bodies with known Content-Length.
+    let body = match req.body_length {
+        BodyLength::ContentLength(len) => {
+            let remaining = len.saturating_sub(overflow_len) as usize;
+            let mut buf = Vec::with_capacity(overflow.len() + remaining);
+            buf.extend_from_slice(overflow);
+            if remaining > 0 {
+                buf.resize(overflow.len() + remaining, 0);
+                let mut read = overflow.len();
+                while read < buf.len() {
+                    let n = client.read(&mut buf[read..]).await.into_diagnostic()?;
+                    if n == 0 {
+                        return Err(miette::miette!(
+                            "Connection closed with {} bytes remaining in PII body buffer",
+                            buf.len() - read
+                        ));
+                    }
+                    read += n;
+                }
+            }
+            Some(buf)
+        }
+        _ => None, // Chunked or no body — skip PII scanning
+    };
+
+    // If we have a buffered body, run PII detection and enforcement.
+    if let Some(mut body_buf) = body {
+        let detections = pii_engine.detect(&body_buf);
+        let result = pii_engine.apply(&mut body_buf, &detections);
+
+        let pii_result = match &result {
+            PiiApplyResult::Clean => PiiRelayResult::Clean,
+            PiiApplyResult::Audited(dets) => PiiRelayResult::Audited(dets.len()),
+            PiiApplyResult::Redacted { count, .. } => PiiRelayResult::Redacted(*count),
+            PiiApplyResult::Blocked { .. } => return Ok(PiiRelayResult::Blocked),
+        };
+
+        // Rewrite headers and update Content-Length if body was modified.
+        let mut rewritten = rewrite_http_header_block(&req.raw_header[..header_end], resolver);
+        if matches!(result, PiiApplyResult::Redacted { .. }) {
+            rewritten = replace_content_length(&rewritten, body_buf.len());
+        }
+
+        upstream.write_all(&rewritten).await.into_diagnostic()?;
+        upstream.write_all(&body_buf).await.into_diagnostic()?;
+        upstream.flush().await.into_diagnostic()?;
+        let reusable = relay_response(&req.action, upstream, client).await?;
+        if !reusable {
+            return Ok(pii_result);
+        }
+        return Ok(pii_result);
+    }
+
+    // No body to scan — fall through to normal relay.
+    let rewritten = rewrite_http_header_block(&req.raw_header[..header_end], resolver);
+    upstream.write_all(&rewritten).await.into_diagnostic()?;
+    if !overflow.is_empty() {
+        upstream.write_all(overflow).await.into_diagnostic()?;
+    }
+    match req.body_length {
+        BodyLength::Chunked => {
+            relay_chunked(client, upstream, &req.raw_header[header_end..]).await?;
+        }
+        _ => {}
+    }
+    upstream.flush().await.into_diagnostic()?;
+    relay_response(&req.action, upstream, client).await?;
+    Ok(PiiRelayResult::Clean)
+}
+
+/// Result of PII-aware request relay.
+#[derive(Debug)]
+pub(crate) enum PiiRelayResult {
+    /// No PII detected.
+    Clean,
+    /// PII detected, logged only.
+    Audited(usize),
+    /// PII detected and redacted (body modified).
+    Redacted(usize),
+    /// PII detected, request blocked (not forwarded).
+    Blocked,
+}
+
+/// Replace the Content-Length header value in a raw HTTP header block.
+fn replace_content_length(header: &[u8], new_len: usize) -> Vec<u8> {
+    let header_str = String::from_utf8_lossy(header);
+    let mut result = String::with_capacity(header_str.len());
+    for line in header_str.split("\r\n") {
+        if line.to_ascii_lowercase().starts_with("content-length:") {
+            result.push_str(&format!("Content-Length: {new_len}"));
+        } else {
+            result.push_str(line);
+        }
+        result.push_str("\r\n");
+    }
+    // Remove trailing extra \r\n that split adds
+    if result.ends_with("\r\n\r\n\r\n") {
+        result.truncate(result.len() - 2);
+    }
+    result.into_bytes()
+}
+
 /// Send a 403 Forbidden JSON deny response.
 async fn send_deny_response<C: AsyncWrite + Unpin>(
     req: &L7Request,

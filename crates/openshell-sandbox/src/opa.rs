@@ -64,6 +64,9 @@ pub struct SandboxConfig {
 /// (one eval per CONNECT request).
 pub struct OpaEngine {
     engine: Mutex<regorus::Engine>,
+    /// Raw YAML data preserved for PII/supply-chain policy parsing.
+    /// `None` when constructed from proto (PII config comes via proto fields instead).
+    raw_data_yaml: Option<String>,
 }
 
 impl OpaEngine {
@@ -84,6 +87,7 @@ impl OpaEngine {
             .map_err(|e| miette::miette!("{e}"))?;
         Ok(Self {
             engine: Mutex::new(engine),
+            raw_data_yaml: Some(yaml_str),
         })
     }
 
@@ -101,6 +105,7 @@ impl OpaEngine {
             .map_err(|e| miette::miette!("{e}"))?;
         Ok(Self {
             engine: Mutex::new(engine),
+            raw_data_yaml: Some(data_yaml.to_string()),
         })
     }
 
@@ -143,7 +148,16 @@ impl OpaEngine {
             .map_err(|e| miette::miette!("{e}"))?;
         Ok(Self {
             engine: Mutex::new(engine),
+            raw_data_yaml: None,
         })
+    }
+
+    /// Parse the PII policy section from the stored YAML data.
+    ///
+    /// Returns `None` if no YAML was stored (proto path) or no `pii` section exists.
+    pub fn pii_policy_def(&self) -> Option<openshell_policy::PiiPolicyDef> {
+        let yaml = self.raw_data_yaml.as_deref()?;
+        openshell_policy::parse_pii_policy(yaml).ok().flatten()
     }
 
     /// Evaluate a network access request against the loaded policy.

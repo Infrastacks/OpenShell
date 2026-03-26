@@ -554,7 +554,10 @@ async fn handle_tcp_connection(
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect(),
             secret_resolver: secret_resolver.clone(),
-            pii_engine: None,            // TODO: construct from policy YAML pii section
+            pii_engine: opa_engine.pii_policy_def().map(|def| {
+                let policy = pii_policy_from_def(&def);
+                openshell_pii::PiiEngine::new(&policy)
+            }),
             supply_chain_engine: None,   // TODO: construct from policy YAML supply_chain section
         };
 
@@ -1859,6 +1862,51 @@ fn is_benign_relay_error(err: &miette::Report) -> bool {
     ];
     let msg = err.to_string().to_ascii_lowercase();
     BENIGN.iter().any(|pat| msg.contains(pat))
+}
+
+/// Convert a parsed `PiiPolicyDef` (YAML types) into an `openshell_pii::PiiPolicy`
+/// (runtime types) suitable for constructing a `PiiEngine`.
+fn pii_policy_from_def(def: &openshell_policy::PiiPolicyDef) -> openshell_pii::PiiPolicy {
+    use openshell_pii::{CustomPattern, EntityType, PiiAction, PiiPolicy};
+    use std::collections::HashMap;
+
+    let parse_action = |s: &str| -> PiiAction {
+        match s {
+            "redact" => PiiAction::Redact,
+            "block" => PiiAction::Block,
+            "warn" => PiiAction::Warn,
+            _ => PiiAction::Audit,
+        }
+    };
+
+    let entities: HashMap<EntityType, PiiAction> = def
+        .entities
+        .iter()
+        .filter_map(|(name, action)| {
+            let et = EntityType::parse(name)?;
+            Some((et, parse_action(action)))
+        })
+        .collect();
+
+    let custom_patterns: Vec<CustomPattern> = def
+        .custom_patterns
+        .iter()
+        .map(|cp| CustomPattern {
+            name: cp.name.clone(),
+            pattern: cp.pattern.clone(),
+            action: parse_action(&cp.action),
+        })
+        .collect();
+
+    PiiPolicy {
+        enforcement: def.enforcement.clone(),
+        max_body_bytes: def.max_body_bytes,
+        entities,
+        custom_patterns,
+        ner_endpoint: def.ner_endpoint.clone(),
+        ner_min_confidence: def.ner_min_confidence as f32,
+        ner_async: def.ner_async,
+    }
 }
 
 #[cfg(test)]
