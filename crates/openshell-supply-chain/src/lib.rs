@@ -16,10 +16,10 @@ mod version;
 
 pub use denylist::check_denylist;
 pub use license::{check_license, LicenseStatus};
-pub use osv_client::{OsvClient, Vulnerability};
+pub use osv_client::{classify_severity, extract_fixed_version, OsvClient, Vulnerability};
 pub use policy::{
     Decision, DenylistEntry, LicensePolicy, SupplyChainEngine, SupplyChainPolicy,
-    SupplyChainResult, VersionPin, VulnCounts, VulnThresholds,
+    SupplyChainResult, VersionPin, VulnCounts, VulnDetail, VulnThresholds,
 };
 pub use registry::{detect_registry_pattern, Ecosystem, RegistryMatch};
 pub use version::check_version_pin;

@@ -187,8 +187,22 @@ impl OsvClient {
     }
 }
 
+/// Extract the first fixed version from a vulnerability's affected ranges.
+pub fn extract_fixed_version(vuln: &Vulnerability) -> Option<String> {
+    for affected in &vuln.affected {
+        for range in &affected.ranges {
+            for event in &range.events {
+                if let Some(ref fixed) = event.fixed {
+                    return Some(fixed.clone());
+                }
+            }
+        }
+    }
+    None
+}
+
 /// Classify a vulnerability severity from its CVSS score or metadata.
-fn classify_severity(vuln: &Vulnerability) -> String {
+pub fn classify_severity(vuln: &Vulnerability) -> String {
     for sev in &vuln.severity {
         if sev.severity_type == "CVSS_V3" || sev.severity_type == "CVSS_V2" {
             if let Ok(score) = sev.score.parse::<f32>() {

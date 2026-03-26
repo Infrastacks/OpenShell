@@ -168,6 +168,24 @@ where
                     {
                         use std::io::Write;
                         let _ = writeln!(f, "{}", event);
+
+                        // Emit individual package.vulnerability events for each vuln found
+                        for vuln in &result.vulnerabilities {
+                            let vuln_event = serde_json::json!({
+                                "eventType": "package.vulnerability",
+                                "timestamp": &now,
+                                "data": {
+                                    "ecosystem": registry_match.ecosystem,
+                                    "packageName": registry_match.package,
+                                    "version": registry_match.version,
+                                    "osvId": vuln.osv_id,
+                                    "severity": vuln.severity,
+                                    "summary": vuln.summary,
+                                    "fixedVersion": vuln.fixed_version.as_deref().unwrap_or(""),
+                                }
+                            });
+                            let _ = writeln!(f, "{}", vuln_event);
+                        }
                     }
                 }
 

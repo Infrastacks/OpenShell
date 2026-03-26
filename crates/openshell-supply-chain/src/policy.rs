@@ -98,6 +98,15 @@ pub struct VulnCounts {
     pub low: u32,
 }
 
+/// Summary of a single vulnerability for telemetry emission.
+#[derive(Debug, Clone)]
+pub struct VulnDetail {
+    pub osv_id: String,
+    pub severity: String,
+    pub summary: String,
+    pub fixed_version: Option<String>,
+}
+
 /// Result of evaluating a package against supply chain policy.
 #[derive(Debug)]
 pub struct SupplyChainResult {
@@ -105,6 +114,8 @@ pub struct SupplyChainResult {
     pub denial_reason: Option<String>,
     pub vuln_counts: VulnCounts,
     pub license_status: LicenseStatus,
+    /// Individual vulnerabilities found (for telemetry events).
+    pub vulnerabilities: Vec<VulnDetail>,
 }
 
 /// Supply chain evaluation engine.
@@ -151,6 +162,7 @@ impl SupplyChainEngine {
                 denial_reason: Some(format!("denylisted: {reason}")),
                 vuln_counts: VulnCounts::default(),
                 license_status: LicenseStatus::Unknown,
+                vulnerabilities: Vec::new(),
             };
         }
 
@@ -173,6 +185,7 @@ impl SupplyChainEngine {
                     denial_reason: Some(reason),
                     vuln_counts: VulnCounts::default(),
                     license_status: LicenseStatus::Unknown,
+                    vulnerabilities: Vec::new(),
                 };
             }
         }
@@ -181,17 +194,21 @@ impl SupplyChainEngine {
         let license_status = LicenseStatus::Unknown;
 
         // 4. OSV vulnerability lookup
-        let vuln_counts = if !version_str.is_empty() {
+        let (vuln_counts, vuln_details) = if !version_str.is_empty() {
             let vulns = self.osv.query(&ecosystem, package, version_str).await;
             let (c, h, m, l) = OsvClient::count_by_severity(&vulns);
-            VulnCounts {
-                critical: c,
-                high: h,
-                medium: m,
-                low: l,
-            }
+            let details: Vec<VulnDetail> = vulns
+                .iter()
+                .map(|v| VulnDetail {
+                    osv_id: v.id.clone(),
+                    severity: crate::osv_client::classify_severity(v),
+                    summary: v.summary.clone(),
+                    fixed_version: crate::osv_client::extract_fixed_version(v),
+                })
+                .collect();
+            (VulnCounts { critical: c, high: h, medium: m, low: l }, details)
         } else {
-            VulnCounts::default()
+            (VulnCounts::default(), Vec::new())
         };
 
         // 5. Threshold evaluation
@@ -206,6 +223,7 @@ impl SupplyChainEngine {
                 denial_reason: Some(reason),
                 vuln_counts,
                 license_status,
+                vulnerabilities: vuln_details,
             };
         }
         if vuln_counts.high > thresholds.max_high {
@@ -218,6 +236,7 @@ impl SupplyChainEngine {
                 denial_reason: Some(reason),
                 vuln_counts,
                 license_status,
+                vulnerabilities: vuln_details,
             };
         }
 
@@ -226,6 +245,7 @@ impl SupplyChainEngine {
             denial_reason: None,
             vuln_counts,
             license_status,
+            vulnerabilities: vuln_details,
         }
     }
 }
