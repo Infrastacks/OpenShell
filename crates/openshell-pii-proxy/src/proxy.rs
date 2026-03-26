@@ -2,7 +2,10 @@ use crate::policy::SharedEngine;
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode};
-use openshell_pii::PiiApplyResult;
+use openshell_pii::{PiiAction, PiiApplyResult, PiiDetection};
+use std::fs::OpenOptions;
+use std::io::Write;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tracing::info;
 
@@ -13,6 +16,7 @@ const MAX_BODY_CAP: usize = 4 * 1024 * 1024; // 4 MiB
 pub struct ProxyState {
     pub engine: SharedEngine,
     pub upstream_url: String,
+    pub events_path: Option<PathBuf>,
     pub client: hyper_util::client::legacy::Client<
         hyper_util::client::legacy::connect::HttpConnector,
         Full<Bytes>,
@@ -44,33 +48,34 @@ pub async fn handle(
 
     // PII scan.
     let mut body_vec = body_bytes.to_vec();
-    let scan_result = {
+    let (scan_result, detections) = {
         let guard = state.engine.read().unwrap();
         match guard.as_ref() {
             Some(engine) => {
-                let detections = engine.detect(&body_vec);
-                Some(engine.apply(&mut body_vec, &detections))
+                let dets = engine.detect(&body_vec);
+                let result = engine.apply(&mut body_vec, &dets);
+                (Some(result), dets)
             }
-            None => None, // passthrough mode
+            None => (None, Vec::new()),
         }
     };
 
     match scan_result {
         None => {
-            // Passthrough — no engine loaded.
             forward(&state, method, &path, &headers, body_bytes).await
         }
         Some(PiiApplyResult::Clean) => {
             forward(&state, method, &path, &headers, body_bytes).await
         }
-        Some(PiiApplyResult::Audited(ref dets)) => {
+        Some(PiiApplyResult::Audited(ref _dets)) => {
             info!(
                 engine = "pii",
                 pii_action = "audit",
-                pii_entities_found = dets.len(),
+                pii_entities_found = detections.len(),
                 policy = "pii-policy",
                 "PII_DETECTION"
             );
+            emit_events(&state, &detections, "audit");
             forward(&state, method, &path, &headers, body_bytes).await
         }
         Some(PiiApplyResult::Redacted { count, .. }) => {
@@ -81,7 +86,7 @@ pub async fn handle(
                 policy = "pii-policy",
                 "PII_DETECTION"
             );
-            // Forward the redacted body.
+            emit_events(&state, &detections, "redact");
             forward(&state, method, &path, &headers, Bytes::from(body_vec)).await
         }
         Some(PiiApplyResult::Blocked { .. }) => {
@@ -91,6 +96,7 @@ pub async fn handle(
                 policy = "pii-policy",
                 "PII_DETECTION"
             );
+            emit_events(&state, &detections, "block");
             Ok(error_response(
                 StatusCode::FORBIDDEN,
                 r#"{"error":{"message":"Request blocked: PII detected in request body","type":"pii_policy_violation","code":"pii_blocked"}}"#,
@@ -147,4 +153,57 @@ fn error_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
         .header("content-type", "application/json")
         .body(Full::new(Bytes::from(body.to_string())))
         .unwrap()
+}
+
+/// Write per-entity PII detection events to the events JSONL file.
+/// Each entity gets its own line so the dashboard can aggregate by entityType.
+fn emit_events(state: &ProxyState, detections: &[PiiDetection], default_action: &str) {
+    let Some(ref path) = state.events_path else { return };
+
+    let mut file = match OpenOptions::new().append(true).create(true).open(path) {
+        Ok(f) => f,
+        Err(e) => {
+            tracing::warn!(error = %e, "Failed to open events file");
+            return;
+        }
+    };
+
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+
+    // Deduplicate by entity type — emit one event per unique entity type.
+    let mut seen = std::collections::HashSet::new();
+    for det in detections {
+        if !seen.insert(det.entity_type) {
+            continue;
+        }
+
+        // Resolve the action for this specific entity from the engine's policy.
+        let action = {
+            let guard = state.engine.read().unwrap();
+            guard.as_ref().map_or_else(
+                || default_action.to_string(),
+                |engine| match engine.policy().action_for(det.entity_type) {
+                    PiiAction::Redact => "redact".to_string(),
+                    PiiAction::Block => "block".to_string(),
+                    PiiAction::Warn => "audit".to_string(),
+                    PiiAction::Audit => "audit".to_string(),
+                },
+            )
+        };
+
+        let event_type = match action.as_str() {
+            "block" => "pii.blocked",
+            "redact" => "pii.redacted",
+            _ => "pii.detected",
+        };
+
+        let line = format!(
+            r#"{{"eventType":"{}","timestamp":"{}","data":{{"entityType":"{}","action":"{}","engine":"pii","direction":"request"}}}}"#,
+            event_type, now, det.entity_type, action,
+        );
+
+        if let Err(e) = writeln!(file, "{}", line) {
+            tracing::warn!(error = %e, "Failed to write PII event");
+        }
+    }
 }

@@ -27,6 +27,10 @@ struct Args {
     /// Path to the PII policy YAML file. If absent, starts in passthrough mode.
     #[arg(long, env = "PII_POLICY_PATH")]
     policy_path: Option<PathBuf>,
+
+    /// Path to the events JSONL file for telemetry integration.
+    #[arg(long, env = "PII_EVENTS_PATH", default_value = "/sandbox/.nemoclaw/events.jsonl")]
+    events_path: PathBuf,
 }
 
 #[tokio::main]
@@ -58,6 +62,7 @@ async fn main() {
     let state = Arc::new(proxy::ProxyState {
         engine,
         upstream_url: upstream.clone(),
+        events_path: Some(args.events_path),
         client,
     });
 
