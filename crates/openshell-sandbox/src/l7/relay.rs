@@ -31,6 +31,10 @@ pub struct L7EvalContext {
     pub cmdline_paths: Vec<String>,
     /// Supervisor-only placeholder resolver for outbound headers.
     pub(crate) secret_resolver: Option<Arc<SecretResolver>>,
+    /// PII detection engine (None = PII scanning disabled).
+    pub pii_engine: Option<openshell_pii::PiiEngine>,
+    /// Supply chain engine (None = supply chain scanning disabled).
+    pub supply_chain_engine: Option<openshell_supply_chain::SupplyChainEngine>,
 }
 
 /// Run protocol-aware L7 inspection on a tunnel.
@@ -45,7 +49,7 @@ pub async fn relay_with_inspection<C, U>(
     engine: Mutex<regorus::Engine>,
     client: &mut C,
     upstream: &mut U,
-    ctx: &L7EvalContext,
+    ctx: &mut L7EvalContext,
 ) -> Result<()>
 where
     C: AsyncRead + AsyncWrite + Unpin + Send,
@@ -74,7 +78,7 @@ async fn relay_rest<C, U>(
     engine: &Mutex<regorus::Engine>,
     client: &mut C,
     upstream: &mut U,
-    ctx: &L7EvalContext,
+    ctx: &mut L7EvalContext,
 ) -> Result<()>
 where
     C: AsyncRead + AsyncWrite + Unpin + Send,
@@ -104,6 +108,32 @@ where
                 return Ok(()); // Close connection on parse error
             }
         };
+
+        // --- Supply chain check (URL-based, before OPA eval) ---
+        if let Some(sc_engine) = ctx.supply_chain_engine.as_mut() {
+            if let Some(registry_match) =
+                openshell_supply_chain::detect_registry_pattern(&ctx.host, &req.target)
+            {
+                let result = sc_engine.evaluate(&registry_match).await;
+                info!(
+                    engine = "supply_chain",
+                    ecosystem = %registry_match.ecosystem,
+                    package = %registry_match.package,
+                    version = %registry_match.version,
+                    decision = %result.decision,
+                    vuln_critical = result.vuln_counts.critical,
+                    vuln_high = result.vuln_counts.high,
+                    "PACKAGE_INSTALL"
+                );
+                if result.decision == openshell_supply_chain::Decision::Deny {
+                    let reason = result.denial_reason.unwrap_or_default();
+                    crate::l7::rest::RestProvider
+                        .deny(&req, &ctx.policy_name, &reason, client)
+                        .await?;
+                    return Ok(());
+                }
+            }
+        }
 
         let request_info = L7RequestInfo {
             action: req.action.clone(),
@@ -182,7 +212,7 @@ fn is_benign_connection_error(err: &miette::Report) -> bool {
 /// Returns `(allowed, deny_reason)`.
 fn evaluate_l7_request(
     engine: &Mutex<regorus::Engine>,
-    ctx: &L7EvalContext,
+    ctx: &mut L7EvalContext,
     request: &L7RequestInfo,
 ) -> Result<(bool, String)> {
     let input_json = serde_json::json!({

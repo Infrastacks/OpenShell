@@ -1,0 +1,120 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
+//! PII policy configuration and detection result types.
+
+use crate::entities::EntityType;
+use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
+use std::fmt;
+use std::ops::Range;
+
+/// Action to take when PII is detected for a given entity type.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PiiAction {
+    /// Log detection but allow data through unmodified.
+    Audit,
+    /// Replace matched text with a redaction token.
+    Redact,
+    /// Deny the entire request/response.
+    Block,
+    /// Log a warning but allow data through.
+    Warn,
+}
+
+/// A custom regex pattern defined by the user/org.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CustomPattern {
+    pub name: String,
+    pub pattern: String,
+    pub action: PiiAction,
+}
+
+/// PII detection policy configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PiiPolicy {
+    /// Default enforcement mode for entity types without explicit action.
+    pub enforcement: String,
+    /// Maximum body size to scan (bytes). Bodies larger than this are skipped.
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: usize,
+    /// Per-entity-type action overrides.
+    #[serde(default)]
+    pub entities: HashMap<EntityType, PiiAction>,
+    /// Custom regex patterns.
+    #[serde(default)]
+    pub custom_patterns: Vec<CustomPattern>,
+}
+
+fn default_max_body_bytes() -> usize {
+    1_048_576 // 1 MiB
+}
+
+impl Default for PiiPolicy {
+    fn default() -> Self {
+        Self {
+            enforcement: "audit".to_string(),
+            max_body_bytes: default_max_body_bytes(),
+            entities: HashMap::new(),
+            custom_patterns: Vec::new(),
+        }
+    }
+}
+
+impl PiiPolicy {
+    /// Get the action for a given entity type, falling back to the default enforcement.
+    pub fn action_for(&self, entity_type: EntityType) -> PiiAction {
+        self.entities.get(&entity_type).copied().unwrap_or_else(|| {
+            match self.enforcement.as_str() {
+                "redact" => PiiAction::Redact,
+                "block" => PiiAction::Block,
+                _ => PiiAction::Audit,
+            }
+        })
+    }
+}
+
+/// A single PII detection within a body.
+///
+/// Custom `Debug` impl redacts `matched_text` to prevent PII leaking into logs.
+#[derive(Clone)]
+pub struct PiiDetection {
+    /// The type of PII entity detected.
+    pub entity_type: EntityType,
+    /// Byte range within the body.
+    pub span: Range<usize>,
+    /// The matched text (redacted in Debug output).
+    pub matched_text: String,
+    /// Detection confidence (0.0–1.0).
+    pub confidence: f32,
+}
+
+impl fmt::Debug for PiiDetection {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("PiiDetection")
+            .field("entity_type", &self.entity_type)
+            .field("span", &self.span)
+            .field("matched_text", &"[REDACTED]")
+            .field("confidence", &self.confidence)
+            .finish()
+    }
+}
+
+/// Result of applying the PII policy to a body.
+#[derive(Debug)]
+pub enum PiiApplyResult {
+    /// No PII detected.
+    Clean,
+    /// PII detected, logged only (audit mode).
+    Audited(Vec<PiiDetection>),
+    /// PII detected and redacted in the body.
+    Redacted {
+        count: usize,
+        detections: Vec<PiiDetection>,
+    },
+    /// PII detected, request/response should be blocked.
+    Blocked {
+        detections: Vec<PiiDetection>,
+    },
+}

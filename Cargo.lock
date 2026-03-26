@@ -2883,6 +2883,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "openshell-pii"
+version = "0.0.0"
+dependencies = [
+ "regex",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "openshell-policy"
 version = "0.0.0"
 dependencies = [
@@ -2933,8 +2942,10 @@ dependencies = [
  "miette",
  "nix",
  "openshell-core",
+ "openshell-pii",
  "openshell-policy",
  "openshell-router",
+ "openshell-supply-chain",
  "rand_core 0.6.4",
  "rcgen",
  "regorus",
@@ -3011,6 +3022,18 @@ dependencies = [
  "tracing-subscriber",
  "uuid",
  "wiremock",
+]
+
+[[package]]
+name = "openshell-supply-chain"
+version = "0.0.0"
+dependencies = [
+ "reqwest",
+ "semver",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]

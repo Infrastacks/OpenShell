@@ -534,7 +534,7 @@ async fn handle_tcp_connection(
             regorus::Engine::new()
         });
 
-        let ctx = crate::l7::relay::L7EvalContext {
+        let mut ctx = crate::l7::relay::L7EvalContext {
             host: host_lc.clone(),
             port,
             policy_name: matched_policy.clone().unwrap_or_default(),
@@ -554,6 +554,8 @@ async fn handle_tcp_connection(
                 .map(|p| p.to_string_lossy().into_owned())
                 .collect(),
             secret_resolver: secret_resolver.clone(),
+            pii_engine: None,            // TODO: construct from policy YAML pii section
+            supply_chain_engine: None,   // TODO: construct from policy YAML supply_chain section
         };
 
         if l7_config.tls == crate::l7::TlsMode::Terminate {
@@ -574,7 +576,7 @@ async fn handle_tcp_connection(
                         std::sync::Mutex::new(tunnel_engine),
                         &mut tls_client,
                         &mut tls_upstream,
-                        &ctx,
+                        &mut ctx,
                     )
                     .await
                 };
@@ -630,7 +632,7 @@ async fn handle_tcp_connection(
                 std::sync::Mutex::new(tunnel_engine),
                 &mut client,
                 &mut upstream,
-                &ctx,
+                &mut ctx,
             )
             .await
             {

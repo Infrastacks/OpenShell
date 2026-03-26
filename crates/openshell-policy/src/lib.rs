@@ -36,6 +36,123 @@ struct PolicyFile {
     process: Option<ProcessDef>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     network_policies: BTreeMap<String, NetworkPolicyRuleDef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pii: Option<PiiPolicyDef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    supply_chain: Option<SupplyChainPolicyDef>,
+}
+
+// ---------------------------------------------------------------------------
+// PII policy YAML types
+// ---------------------------------------------------------------------------
+
+/// PII detection policy configuration in the sandbox policy YAML.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PiiPolicyDef {
+    /// Enforcement mode: "audit", "redact", or "block".
+    #[serde(default = "default_audit")]
+    pub enforcement: String,
+    /// Maximum body size to scan in bytes (default 1 MiB).
+    #[serde(default = "default_max_body_bytes")]
+    pub max_body_bytes: usize,
+    /// Per-entity-type action overrides (entity_name → action).
+    #[serde(default)]
+    pub entities: HashMap<String, String>,
+    /// Custom regex patterns for org-specific PII.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_patterns: Vec<PiiCustomPatternDef>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PiiCustomPatternDef {
+    pub name: String,
+    pub pattern: String,
+    #[serde(default = "default_audit")]
+    pub action: String,
+}
+
+fn default_audit() -> String {
+    "audit".to_string()
+}
+
+fn default_max_body_bytes() -> usize {
+    1_048_576
+}
+
+// ---------------------------------------------------------------------------
+// Supply chain policy YAML types
+// ---------------------------------------------------------------------------
+
+/// Supply chain security policy in the sandbox policy YAML.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SupplyChainPolicyDef {
+    /// Enforcement mode: "audit" or "enforce".
+    #[serde(default = "default_audit")]
+    pub enforcement: String,
+    /// Vulnerability count thresholds.
+    #[serde(default)]
+    pub vulnerability_thresholds: VulnThresholdsDef,
+    /// License allow/deny policy.
+    #[serde(default)]
+    pub license_policy: LicensePolicyDef,
+    /// Explicitly denied packages.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denylist: Vec<DenylistEntryDef>,
+    /// Version pinning rules.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub version_pinning: Vec<VersionPinDef>,
+    /// OSV cache TTL in hours (default 4).
+    #[serde(default = "default_osv_ttl")]
+    pub osv_cache_ttl_hours: u64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct VulnThresholdsDef {
+    #[serde(default)]
+    pub max_critical: u32,
+    #[serde(default = "default_max_high")]
+    pub max_high: u32,
+    #[serde(default)]
+    pub block_unfixed_critical: bool,
+}
+
+fn default_max_high() -> u32 {
+    5
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+#[serde(deny_unknown_fields)]
+pub struct LicensePolicyDef {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub denied: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DenylistEntryDef {
+    pub package: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub ecosystem: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VersionPinDef {
+    pub package: String,
+    pub ecosystem: String,
+    pub range: String,
+}
+
+fn default_osv_ttl() -> u64 {
+    4
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -302,6 +419,10 @@ fn from_proto(policy: &SandboxPolicy) -> PolicyFile {
         landlock,
         process,
         network_policies,
+        // PII and supply chain policies are YAML-only (not in proto).
+        // They are preserved across round-trips via separate accessors.
+        pii: None,
+        supply_chain: None,
     }
 }
 
@@ -353,6 +474,25 @@ pub fn load_sandbox_policy(cli_path: Option<&str>) -> Result<Option<SandboxPolic
         return Ok(None);
     };
     parse_sandbox_policy(&contents).map(Some)
+}
+
+/// Parse PII policy from a YAML string (returns `None` if no `pii` section).
+///
+/// This is separate from [`parse_sandbox_policy`] because PII/supply-chain
+/// configs live in the YAML layer only (not in the proto `SandboxPolicy`).
+pub fn parse_pii_policy(yaml: &str) -> Result<Option<PiiPolicyDef>> {
+    let raw: PolicyFile = serde_yaml::from_str(yaml)
+        .into_diagnostic()
+        .wrap_err("failed to parse sandbox policy YAML")?;
+    Ok(raw.pii)
+}
+
+/// Parse supply chain policy from a YAML string (returns `None` if no section).
+pub fn parse_supply_chain_policy(yaml: &str) -> Result<Option<SupplyChainPolicyDef>> {
+    let raw: PolicyFile = serde_yaml::from_str(yaml)
+        .into_diagnostic()
+        .wrap_err("failed to parse sandbox policy YAML")?;
+    Ok(raw.supply_chain)
 }
 
 /// Well-known path where a sandbox container image can ship a policy YAML file.
