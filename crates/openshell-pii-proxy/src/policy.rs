@@ -1,9 +1,10 @@
-use openshell_pii::{CustomPattern, EntityType, PiiAction, PiiEngine, PiiPolicy};
+use openshell_pii::{CustomPattern, EntityType, NerClient, PiiAction, PiiEngine, PiiPolicy};
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::{Mutex, RwLock};
 use tracing::{info, warn};
 
 /// Top-level policy YAML structure (matches openshell-policy format).
@@ -103,8 +104,18 @@ pub fn load_engine(path: &Path) -> Result<Option<PiiEngine>, String> {
     }))
 }
 
+/// Extract ner_endpoint from a policy file without building a full engine.
+fn load_ner_endpoint(path: &Path) -> Option<String> {
+    let content = std::fs::read_to_string(path).ok()?;
+    let file: PolicyFile = serde_yaml::from_str(&content).ok()?;
+    file.pii.and_then(|sec| sec.ner_endpoint)
+}
+
 /// Shared engine handle — `None` means passthrough mode (no PII scanning).
 pub type SharedEngine = Arc<RwLock<Option<PiiEngine>>>;
+
+/// Shared NER client handle — `None` means NER is not configured.
+pub type SharedNerClient = Arc<Mutex<Option<NerClient>>>;
 
 /// Create a shared engine, loading from the policy file if it exists.
 pub fn init_engine(path: Option<&Path>) -> SharedEngine {
@@ -131,8 +142,22 @@ pub fn init_engine(path: Option<&Path>) -> SharedEngine {
     Arc::new(RwLock::new(engine))
 }
 
+/// Create a shared NER client from the policy file's ner_endpoint.
+pub fn init_ner_client(path: Option<&Path>) -> SharedNerClient {
+    let client = path.and_then(|p| {
+        let endpoint = load_ner_endpoint(p)?;
+        info!(endpoint = %endpoint, "NER client initialized");
+        Some(NerClient::new(endpoint))
+    });
+    Arc::new(Mutex::new(client))
+}
+
 /// Spawn a background task that polls the policy file for changes.
-pub fn spawn_watcher(path: PathBuf, engine: SharedEngine) -> tokio::task::JoinHandle<()> {
+pub fn spawn_watcher(
+    path: PathBuf,
+    engine: SharedEngine,
+    ner_client: SharedNerClient,
+) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
         let mut last_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
         loop {
@@ -149,7 +174,10 @@ pub fn spawn_watcher(path: PathBuf, engine: SharedEngine) -> tokio::task::JoinHa
             if changed {
                 match load_engine(&path) {
                     Ok(new_engine) => {
-                        *engine.write().unwrap() = new_engine;
+                        // Update NER client if endpoint changed.
+                        let new_ner = load_ner_endpoint(&path).map(NerClient::new);
+                        *ner_client.lock().await = new_ner;
+                        *engine.write().await = new_engine;
                         info!(path = %path.display(), "PII policy reloaded");
                     }
                     Err(e) => warn!(error = %e, "Failed to reload PII policy"),

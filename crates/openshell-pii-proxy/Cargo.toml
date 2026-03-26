@@ -12,7 +12,7 @@ name = "pii-policy-proxy"
 path = "src/main.rs"
 
 [dependencies]
-openshell-pii = { path = "../openshell-pii" }
+openshell-pii = { path = "../openshell-pii", features = ["ner"] }
 
 tokio = { workspace = true }
 hyper = { workspace = true }

@@ -1,8 +1,9 @@
-use crate::policy::SharedEngine;
+use crate::policy::{SharedEngine, SharedNerClient};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper::{Request, Response, StatusCode};
 use openshell_pii::{PiiAction, PiiApplyResult, PiiDetection};
+use std::collections::HashMap;
 use std::fs::OpenOptions;
 use std::io::Write;
 use std::path::PathBuf;
@@ -15,6 +16,7 @@ const MAX_BODY_CAP: usize = 4 * 1024 * 1024; // 4 MiB
 /// State shared across all request handlers.
 pub struct ProxyState {
     pub engine: SharedEngine,
+    pub ner_client: SharedNerClient,
     pub upstream_url: String,
     pub events_path: Option<PathBuf>,
     pub client: hyper_util::client::legacy::Client<
@@ -46,17 +48,38 @@ pub async fn handle(
         return forward(&state, method, &path, &headers, body_bytes).await;
     }
 
-    // PII scan.
+    // PII scan — use NER-augmented detection when available.
     let mut body_vec = body_bytes.to_vec();
-    let (scan_result, detections) = {
-        let guard = state.engine.read().unwrap();
-        match guard.as_ref() {
+    let (scan_result, detections, action_map) = {
+        let engine_guard = state.engine.read().await;
+        match engine_guard.as_ref() {
             Some(engine) => {
-                let dets = engine.detect(&body_vec);
+                // Try NER-augmented detection if a NER client is configured.
+                let mut ner_guard = state.ner_client.lock().await;
+                let dets = match ner_guard.as_mut() {
+                    Some(ner) => engine.detect_with_ner(&body_vec, ner).await,
+                    None => engine.detect(&body_vec),
+                };
+                drop(ner_guard);
+
+                // Pre-compute per-entity action strings while we hold the engine.
+                let actions: HashMap<openshell_pii::EntityType, String> = dets
+                    .iter()
+                    .map(|d| {
+                        let a = match engine.policy().action_for(d.entity_type) {
+                            PiiAction::Redact => "redact",
+                            PiiAction::Block => "block",
+                            PiiAction::Warn => "audit",
+                            PiiAction::Audit => "audit",
+                        };
+                        (d.entity_type, a.to_string())
+                    })
+                    .collect();
+
                 let result = engine.apply(&mut body_vec, &dets);
-                (Some(result), dets)
+                (Some(result), dets, actions)
             }
-            None => (None, Vec::new()),
+            None => (None, Vec::new(), HashMap::new()),
         }
     };
 
@@ -75,7 +98,7 @@ pub async fn handle(
                 policy = "pii-policy",
                 "PII_DETECTION"
             );
-            emit_events(&state, &detections, "audit");
+            emit_events(&state, &detections, &action_map, "audit");
             forward(&state, method, &path, &headers, body_bytes).await
         }
         Some(PiiApplyResult::Redacted { count, .. }) => {
@@ -86,7 +109,7 @@ pub async fn handle(
                 policy = "pii-policy",
                 "PII_DETECTION"
             );
-            emit_events(&state, &detections, "redact");
+            emit_events(&state, &detections, &action_map, "redact");
             forward(&state, method, &path, &headers, Bytes::from(body_vec)).await
         }
         Some(PiiApplyResult::Blocked { .. }) => {
@@ -96,7 +119,7 @@ pub async fn handle(
                 policy = "pii-policy",
                 "PII_DETECTION"
             );
-            emit_events(&state, &detections, "block");
+            emit_events(&state, &detections, &action_map, "block");
             Ok(error_response(
                 StatusCode::FORBIDDEN,
                 r#"{"error":{"message":"Request blocked: PII detected in request body","type":"pii_policy_violation","code":"pii_blocked"}}"#,
@@ -157,7 +180,13 @@ fn error_response(status: StatusCode, body: &str) -> Response<Full<Bytes>> {
 
 /// Write per-entity PII detection events to the events JSONL file.
 /// Each entity gets its own line so the dashboard can aggregate by entityType.
-fn emit_events(state: &ProxyState, detections: &[PiiDetection], default_action: &str) {
+/// The action_map is pre-computed from the engine to avoid re-acquiring the lock.
+fn emit_events(
+    state: &ProxyState,
+    detections: &[PiiDetection],
+    action_map: &HashMap<openshell_pii::EntityType, String>,
+    default_action: &str,
+) {
     let Some(ref path) = state.events_path else { return };
 
     let mut file = match OpenOptions::new().append(true).create(true).open(path) {
@@ -177,21 +206,12 @@ fn emit_events(state: &ProxyState, detections: &[PiiDetection], default_action: 
             continue;
         }
 
-        // Resolve the action for this specific entity from the engine's policy.
-        let action = {
-            let guard = state.engine.read().unwrap();
-            guard.as_ref().map_or_else(
-                || default_action.to_string(),
-                |engine| match engine.policy().action_for(det.entity_type) {
-                    PiiAction::Redact => "redact".to_string(),
-                    PiiAction::Block => "block".to_string(),
-                    PiiAction::Warn => "audit".to_string(),
-                    PiiAction::Audit => "audit".to_string(),
-                },
-            )
-        };
+        let action = action_map
+            .get(&det.entity_type)
+            .map(|s| s.as_str())
+            .unwrap_or(default_action);
 
-        let event_type = match action.as_str() {
+        let event_type = match action {
             "block" => "pii.blocked",
             "redact" => "pii.redacted",
             _ => "pii.detected",

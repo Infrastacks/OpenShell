@@ -50,9 +50,12 @@ async fn main() {
     // Load PII engine (or start in passthrough mode).
     let engine = policy::init_engine(args.policy_path.as_deref());
 
+    // Initialize NER client from policy's ner_endpoint (if configured).
+    let ner_client = policy::init_ner_client(args.policy_path.as_deref());
+
     // Spawn hot-reload watcher if a policy path is configured.
     if let Some(ref path) = args.policy_path {
-        policy::spawn_watcher(path.clone(), engine.clone());
+        policy::spawn_watcher(path.clone(), engine.clone(), ner_client.clone());
     }
 
     // Build upstream HTTP client.
@@ -61,6 +64,7 @@ async fn main() {
 
     let state = Arc::new(proxy::ProxyState {
         engine,
+        ner_client,
         upstream_url: upstream.clone(),
         events_path: Some(args.events_path),
         client,
