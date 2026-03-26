@@ -2895,6 +2895,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "openshell-pii-proxy"
+version = "0.0.0"
+dependencies = [
+ "clap",
+ "http",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "openshell-pii",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "openshell-policy"
 version = "0.0.0"
 dependencies = [
