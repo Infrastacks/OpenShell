@@ -193,26 +193,78 @@ impl SupplyChainEngine {
         // 3. License check (placeholder — real check needs package metadata API)
         let license_status = LicenseStatus::Unknown;
 
-        // 4. OSV vulnerability lookup
+        // 4. OSV vulnerability lookup (fail-closed in enforce mode)
         let (vuln_counts, vuln_details) = if !version_str.is_empty() {
-            let vulns = self.osv.query(&ecosystem, package, version_str).await;
-            let (c, h, m, l) = OsvClient::count_by_severity(&vulns);
-            let details: Vec<VulnDetail> = vulns
-                .iter()
-                .map(|v| VulnDetail {
-                    osv_id: v.id.clone(),
-                    severity: crate::osv_client::classify_severity(v),
-                    summary: v.summary.clone(),
-                    fixed_version: crate::osv_client::extract_fixed_version(v),
-                })
-                .collect();
-            (VulnCounts { critical: c, high: h, medium: m, low: l }, details)
+            match self.osv.query(&ecosystem, package, version_str).await {
+                Ok(vulns) => {
+                    let (c, h, m, l) = OsvClient::count_by_severity(&vulns);
+                    let details: Vec<VulnDetail> = vulns
+                        .iter()
+                        .map(|v| VulnDetail {
+                            osv_id: v.id.clone(),
+                            severity: crate::osv_client::classify_severity(v),
+                            summary: v.summary.clone(),
+                            fixed_version: crate::osv_client::extract_fixed_version(v),
+                        })
+                        .collect();
+                    (VulnCounts { critical: c, high: h, medium: m, low: l }, details)
+                }
+                Err(e) => {
+                    // Fail-closed: if OSV is unreachable in enforce mode, deny.
+                    // In audit mode, allow with warning.
+                    if enforce {
+                        let reason = format!(
+                            "vulnerability database unreachable ({e}); \
+                             denying install per fail-closed policy"
+                        );
+                        return SupplyChainResult {
+                            decision: Decision::Deny,
+                            denial_reason: Some(reason),
+                            vuln_counts: VulnCounts::default(),
+                            license_status,
+                            vulnerabilities: Vec::new(),
+                        };
+                    }
+                    info!(
+                        engine = "supply_chain",
+                        error = %e,
+                        ecosystem = %ecosystem,
+                        package = %package,
+                        "OSV unreachable, allowing in audit mode"
+                    );
+                    (VulnCounts::default(), Vec::new())
+                }
+            }
         } else {
             (VulnCounts::default(), Vec::new())
         };
 
-        // 5. Threshold evaluation
+        // 5. Block unfixed critical vulnerabilities
         let thresholds = &self.policy.vulnerability_thresholds;
+        if thresholds.block_unfixed_critical {
+            let unfixed_critical = vuln_details
+                .iter()
+                .any(|v| v.severity == "CRITICAL" && v.fixed_version.is_none());
+            if unfixed_critical {
+                let reason = "unfixed critical vulnerability detected".to_string();
+                info!(
+                    engine = "supply_chain",
+                    check = "block_unfixed_critical",
+                    ecosystem = %ecosystem,
+                    package = %package,
+                    "Unfixed critical vulnerability"
+                );
+                return SupplyChainResult {
+                    decision: if enforce { Decision::Deny } else { Decision::Audit },
+                    denial_reason: Some(reason),
+                    vuln_counts,
+                    license_status,
+                    vulnerabilities: vuln_details,
+                };
+            }
+        }
+
+        // 6. Threshold evaluation
         if vuln_counts.critical > thresholds.max_critical {
             let reason = format!(
                 "{} critical vulnerabilities (max: {})",
@@ -247,5 +299,74 @@ impl SupplyChainEngine {
             license_status,
             vulnerabilities: vuln_details,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn serde_round_trip() {
+        let yaml = r#"
+enforcement: enforce
+vulnerability_thresholds:
+  max_critical: 0
+  max_high: 3
+  block_unfixed_critical: true
+license_policy:
+  allowed: [MIT, Apache-2.0]
+  denied: [GPL-3.0]
+denylist:
+  - package: left-pad
+    ecosystem: npm
+    reason: "npm incident"
+version_pinning:
+  - package: lodash
+    ecosystem: npm
+    range: ">=4.0.0,<5.0.0"
+osv_cache_ttl_hours: 8
+"#;
+        let policy: SupplyChainPolicy = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(policy.enforcement, "enforce");
+        assert_eq!(policy.vulnerability_thresholds.max_critical, 0);
+        assert_eq!(policy.vulnerability_thresholds.max_high, 3);
+        assert!(policy.vulnerability_thresholds.block_unfixed_critical);
+        assert_eq!(policy.license_policy.allowed, vec!["MIT", "Apache-2.0"]);
+        assert_eq!(policy.license_policy.denied, vec!["GPL-3.0"]);
+        assert_eq!(policy.denylist.len(), 1);
+        assert_eq!(policy.denylist[0].package, "left-pad");
+        assert_eq!(policy.version_pinning.len(), 1);
+        assert_eq!(policy.osv_cache_ttl_hours, 8);
+
+        let json = serde_json::to_string(&policy).unwrap();
+        let restored: SupplyChainPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.enforcement, "enforce");
+        assert!(restored.vulnerability_thresholds.block_unfixed_critical);
+    }
+
+    #[test]
+    fn default_thresholds() {
+        // derive(Default) uses u32::default() = 0 for all fields.
+        // serde(default = "default_max_high") only applies during deserialization.
+        let t = VulnThresholds::default();
+        assert_eq!(t.max_critical, 0);
+        assert_eq!(t.max_high, 0);
+        assert!(!t.block_unfixed_critical);
+    }
+
+    #[test]
+    fn serde_default_max_high() {
+        // When deserialized with missing fields, serde uses default_max_high() = 5.
+        let yaml = "max_critical: 0\n";
+        let t: VulnThresholds = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(t.max_high, 5);
+    }
+
+    #[test]
+    fn decision_display() {
+        assert_eq!(Decision::Allow.to_string(), "allow");
+        assert_eq!(Decision::Deny.to_string(), "deny");
+        assert_eq!(Decision::Audit.to_string(), "audit");
     }
 }
