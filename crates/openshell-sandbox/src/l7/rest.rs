@@ -235,9 +235,18 @@ where
 
         let pii_result = match &result {
             PiiApplyResult::Clean => PiiRelayResult::Clean,
-            PiiApplyResult::Audited(dets) => PiiRelayResult::Audited(dets.len()),
-            PiiApplyResult::Redacted { count, .. } => PiiRelayResult::Redacted(*count),
-            PiiApplyResult::Blocked { .. } => return Ok(PiiRelayResult::Blocked),
+            PiiApplyResult::Audited(dets) => {
+                let types = collect_entity_types(dets);
+                PiiRelayResult::Audited(dets.len(), types)
+            }
+            PiiApplyResult::Redacted { count, detections } => {
+                let types = collect_entity_types(detections);
+                PiiRelayResult::Redacted(*count, types)
+            }
+            PiiApplyResult::Blocked { detections } => {
+                let types = collect_entity_types(detections);
+                return Ok(PiiRelayResult::Blocked(types));
+            }
         };
 
         // Rewrite headers and update Content-Length if body was modified.
@@ -278,12 +287,23 @@ where
 pub(crate) enum PiiRelayResult {
     /// No PII detected.
     Clean,
-    /// PII detected, logged only.
-    Audited(usize),
-    /// PII detected and redacted (body modified).
-    Redacted(usize),
-    /// PII detected, request blocked (not forwarded).
-    Blocked,
+    /// PII detected, logged only. (count, entity_type_names)
+    Audited(usize, Vec<String>),
+    /// PII detected and redacted (body modified). (count, entity_type_names)
+    Redacted(usize, Vec<String>),
+    /// PII detected, request blocked (not forwarded). (entity_type_names)
+    Blocked(Vec<String>),
+}
+
+/// Collect unique entity type names from PII detections.
+fn collect_entity_types(detections: &[openshell_pii::PiiDetection]) -> Vec<String> {
+    let mut types: Vec<String> = detections
+        .iter()
+        .map(|d| d.entity_type.to_string())
+        .collect();
+    types.sort_unstable();
+    types.dedup();
+    types
 }
 
 /// Replace the Content-Length header value in a raw HTTP header block.
@@ -305,7 +325,26 @@ fn replace_content_length(header: &[u8], new_len: usize) -> Vec<u8> {
     result.into_bytes()
 }
 
-/// Send a 403 Forbidden JSON deny response.
+/// Sanitize a reason string for use in an HTTP status line.
+///
+/// Strips control characters (`\r`, `\n`, `\0`) and truncates to 200 chars
+/// so the reason phrase is safe for HTTP/1.1 and readable by clients like pip
+/// that display the reason phrase in error messages.
+fn sanitize_reason(reason: &str) -> String {
+    let clean: String = reason
+        .chars()
+        .filter(|c| *c != '\r' && *c != '\n' && *c != '\0')
+        .take(200)
+        .collect();
+    clean
+}
+
+/// Send a 403 deny response with the reason in the HTTP status line.
+///
+/// The JSON body provides structured detail for programmatic consumers.
+/// The status-line reason phrase (`403 Blocked: ...`) is what pip, curl, and
+/// other HTTP clients display to users, making denial reasons visible without
+/// requiring JSON parsing.
 async fn send_deny_response<C: AsyncWrite + Unpin>(
     req: &L7Request,
     policy_name: &str,
@@ -319,8 +358,9 @@ async fn send_deny_response<C: AsyncWrite + Unpin>(
         "detail": reason
     });
     let body_bytes = body.to_string();
+    let status_reason = sanitize_reason(reason);
     let response = format!(
-        "HTTP/1.1 403 Forbidden\r\n\
+        "HTTP/1.1 403 Blocked: {status_reason}\r\n\
          Content-Type: application/json\r\n\
          Content-Length: {}\r\n\
          X-OpenShell-Policy: {}\r\n\

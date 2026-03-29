@@ -11,7 +11,7 @@ use crate::policy::{FilesystemPolicy, LandlockCompatibility, LandlockPolicy, Pro
 use miette::Result;
 use openshell_core::proto::SandboxPolicy as ProtoSandboxPolicy;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Mutex, RwLock};
 
 /// Baked-in rego rules for OPA policy evaluation.
 /// These rules define the network access decision logic and static config
@@ -62,11 +62,17 @@ pub struct SandboxConfig {
 /// evaluation, so access is serialized via a `Mutex`. This is acceptable
 /// because policy evaluation is fast (microseconds) and contention is low
 /// (one eval per CONNECT request).
+///
+/// The `raw_data_yaml` field is behind an `RwLock` to support hot-reload:
+/// concurrent PII policy reads (per-tunnel) are unblocked during L4 evaluation,
+/// and the rare reload path acquires write locks on both fields sequentially.
 pub struct OpaEngine {
     engine: Mutex<regorus::Engine>,
     /// Raw YAML data preserved for PII/supply-chain policy parsing.
     /// `None` when constructed from proto (PII config comes via proto fields instead).
-    raw_data_yaml: Option<String>,
+    /// Behind `RwLock` to allow atomic swap during hot-reload while permitting
+    /// concurrent reads for per-tunnel PII engine construction.
+    raw_data_yaml: RwLock<Option<String>>,
 }
 
 impl OpaEngine {
@@ -87,7 +93,7 @@ impl OpaEngine {
             .map_err(|e| miette::miette!("{e}"))?;
         Ok(Self {
             engine: Mutex::new(engine),
-            raw_data_yaml: Some(yaml_str),
+            raw_data_yaml: RwLock::new(Some(yaml_str)),
         })
     }
 
@@ -105,7 +111,7 @@ impl OpaEngine {
             .map_err(|e| miette::miette!("{e}"))?;
         Ok(Self {
             engine: Mutex::new(engine),
-            raw_data_yaml: Some(data_yaml.to_string()),
+            raw_data_yaml: RwLock::new(Some(data_yaml.to_string())),
         })
     }
 
@@ -148,15 +154,17 @@ impl OpaEngine {
             .map_err(|e| miette::miette!("{e}"))?;
         Ok(Self {
             engine: Mutex::new(engine),
-            raw_data_yaml: None,
+            raw_data_yaml: RwLock::new(None),
         })
     }
 
     /// Parse the PII policy section from the stored YAML data.
     ///
     /// Returns `None` if no YAML was stored (proto path) or no `pii` section exists.
+    /// Acquires a read lock on `raw_data_yaml` — concurrent reads are allowed.
     pub fn pii_policy_def(&self) -> Option<openshell_policy::PiiPolicyDef> {
-        let yaml = self.raw_data_yaml.as_deref()?;
+        let guard = self.raw_data_yaml.read().ok()?;
+        let yaml = guard.as_deref()?;
         openshell_policy::parse_pii_policy(yaml).ok().flatten()
     }
 
@@ -297,6 +305,51 @@ impl OpaEngine {
             .engine
             .into_inner()
             .map_err(|_| miette::miette!("lock poisoned on new engine"))?;
+        let new_yaml = new
+            .raw_data_yaml
+            .into_inner()
+            .map_err(|_| miette::miette!("RwLock poisoned on new YAML"))?;
+        // Swap YAML first (PII stays ahead of network policy in the micro-window)
+        {
+            let mut yaml = self
+                .raw_data_yaml
+                .write()
+                .map_err(|_| miette::miette!("raw_data_yaml RwLock poisoned"))?;
+            *yaml = new_yaml;
+        }
+        let mut engine = self
+            .engine
+            .lock()
+            .map_err(|_| miette::miette!("OPA engine lock poisoned"))?;
+        *engine = new_engine;
+        Ok(())
+    }
+
+    /// Reload policy from files (rego rules + YAML data).
+    ///
+    /// Reads the YAML data file, builds a new regorus engine through the same
+    /// validated pipeline as `from_files()`, then atomically swaps both the
+    /// engine and `raw_data_yaml`. On failure, the previous engine is untouched
+    /// (Last Known Good). New tunnels pick up the new policy; existing tunnels
+    /// continue with their cloned engine.
+    pub fn reload_from_files(&self, policy_path: &Path, data_path: &Path) -> Result<()> {
+        let new = Self::from_files(policy_path, data_path)?;
+        let new_engine = new
+            .engine
+            .into_inner()
+            .map_err(|_| miette::miette!("lock poisoned on new engine"))?;
+        let new_yaml = new
+            .raw_data_yaml
+            .into_inner()
+            .map_err(|_| miette::miette!("RwLock poisoned on new YAML"))?;
+        // Swap YAML first so PII config stays ahead of network policy
+        {
+            let mut yaml = self
+                .raw_data_yaml
+                .write()
+                .map_err(|_| miette::miette!("raw_data_yaml RwLock poisoned"))?;
+            *yaml = new_yaml;
+        }
         let mut engine = self
             .engine
             .lock()

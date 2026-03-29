@@ -19,14 +19,19 @@ pub enum Ecosystem {
 }
 
 impl fmt::Display for Ecosystem {
+    /// Returns the OSV-compatible ecosystem identifier.
+    ///
+    /// These must match the official OSV ecosystem names exactly (case-sensitive)
+    /// since the `Display` output is used in OSV API queries.
+    /// See: <https://ossf.github.io/osv-schema/#affectedpackage-field>
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Npm => write!(f, "npm"),
-            Self::PyPI => write!(f, "pypi"),
-            Self::Cargo => write!(f, "cargo"),
-            Self::Go => write!(f, "go"),
-            Self::Maven => write!(f, "maven"),
-            Self::NuGet => write!(f, "nuget"),
+            Self::PyPI => write!(f, "PyPI"),
+            Self::Cargo => write!(f, "crates.io"),
+            Self::Go => write!(f, "Go"),
+            Self::Maven => write!(f, "Maven"),
+            Self::NuGet => write!(f, "NuGet"),
         }
     }
 }

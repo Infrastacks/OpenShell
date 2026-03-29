@@ -26,6 +26,7 @@ use miette::{IntoDiagnostic, Result};
 #[cfg(target_os = "linux")]
 use std::collections::HashSet;
 use std::net::SocketAddr;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 #[cfg(target_os = "linux")]
@@ -170,6 +171,9 @@ pub async fn run_sandbox(
     // Load policy and initialize OPA engine
     let openshell_endpoint_for_proxy = openshell_endpoint.clone();
     let sandbox_name_for_agg = sandbox.clone();
+    // Preserve file paths for the policy file watcher (consumed by load_policy).
+    let policy_rules_path = policy_rules.clone();
+    let policy_data_path = policy_data.clone();
     let (policy, opa_engine) = load_policy(
         sandbox_id.clone(),
         sandbox,
@@ -387,7 +391,14 @@ pub async fn run_sandbox(
     if health_check {
         let addr: SocketAddr = ([127, 0, 0, 1], health_port).into();
         tokio::spawn(async move {
-            let listener = match tokio::net::TcpListener::bind(addr).await {
+            let listener = match (|| async {
+                let socket = tokio::net::TcpSocket::new_v4()?;
+                socket.set_reuseaddr(true)?;
+                socket.bind(addr)?;
+                socket.listen(128)
+            })()
+            .await
+            {
                 Ok(l) => {
                     info!(addr = %addr, "Health check server listening");
                     l
@@ -408,7 +419,7 @@ pub async fn run_sandbox(
                 // Spawn per-connection with a hard timeout to prevent resource
                 // exhaustion from slow or malicious clients.
                 tokio::spawn(async move {
-                    let result = tokio::time::timeout(Duration::from_secs(5), async {
+                    let result = timeout(Duration::from_secs(5), async {
                         let mut stream = stream;
                         // Drain up to 4 KiB of the request before responding.
                         // Prevents the response from being sent before the client
@@ -690,6 +701,20 @@ pub async fn run_sandbox(
         }
     }
 
+    // Spawn file-based policy watcher (file mode only — complements the gRPC
+    // poll loop above). Watches the policy data YAML for mtime changes and
+    // hot-reloads the OPA engine in-place, eliminating process restarts for
+    // PII/network policy updates.
+    if let (Some(rules_path), Some(data_path), Some(engine)) =
+        (&policy_rules_path, &policy_data_path, &opa_engine)
+    {
+        spawn_policy_file_watcher(
+            engine.clone(),
+            PathBuf::from(rules_path),
+            PathBuf::from(data_path),
+        );
+    }
+
     // Wait for process with optional timeout
     let result = if timeout_secs > 0 {
         if let Ok(result) = timeout(Duration::from_secs(timeout_secs), handle.wait()).await {
@@ -930,6 +955,62 @@ pub(crate) fn spawn_route_refresh(
                 Err(e) => {
                     warn!(error = %e, "Failed to refresh inference route cache, keeping stale routes");
                 }
+            }
+        }
+    });
+}
+
+/// Spawn a background task that watches the policy data YAML file for changes
+/// and hot-reloads the OPA engine in-place.
+///
+/// Modeled on the proven `spawn_watcher()` pattern in `openshell-pii-proxy`.
+/// Polls the file's modification time every 2 seconds. On change, rebuilds the
+/// full OPA engine through the validated `from_files()` pipeline and atomically
+/// swaps both the regorus engine and `raw_data_yaml`. On failure, the previous
+/// engine is untouched (Last Known Good).
+///
+/// New CONNECT tunnels see the updated policy immediately; existing tunnels
+/// continue with their cloned engine (no mid-stream disruption).
+fn spawn_policy_file_watcher(
+    opa_engine: Arc<OpaEngine>,
+    policy_rules_path: PathBuf,
+    data_path: PathBuf,
+) {
+    tokio::spawn(async move {
+        let mut last_mtime = std::fs::metadata(&data_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+
+        loop {
+            tokio::time::sleep(Duration::from_secs(2)).await;
+
+            let current_mtime = std::fs::metadata(&data_path)
+                .ok()
+                .and_then(|m| m.modified().ok());
+
+            let changed = match (last_mtime, current_mtime) {
+                (None, Some(_)) => true,
+                (Some(prev), Some(cur)) => cur != prev,
+                _ => false,
+            };
+
+            if changed {
+                match opa_engine.reload_from_files(&policy_rules_path, &data_path) {
+                    Ok(()) => {
+                        info!(
+                            path = %data_path.display(),
+                            "OPA policy hot-reloaded from file"
+                        );
+                    }
+                    Err(e) => {
+                        warn!(
+                            path = %data_path.display(),
+                            error = %e,
+                            "Failed to hot-reload OPA policy, keeping previous (LKG)"
+                        );
+                    }
+                }
+                last_mtime = current_mtime;
             }
         }
     });

@@ -109,11 +109,11 @@ impl PiiEngine {
             }
         }
 
-        // Run custom patterns (use a synthetic entity type — ApiKey as placeholder).
+        // Run custom patterns.
         for (name, regex, _action) in &self.custom {
             for m in regex.find_iter(text) {
                 detections.push(PiiDetection {
-                    entity_type: EntityType::ApiKey, // Custom patterns map to ApiKey for now
+                    entity_type: EntityType::Custom,
                     span: m.start()..m.end(),
                     matched_text: m.as_str().to_string(),
                     confidence: 0.8,

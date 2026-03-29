@@ -69,8 +69,13 @@ impl NerClient {
     /// The endpoint should be a cluster-internal URL like
     /// `http://codicera-ner.codicera-default.svc.cluster.local:8080`.
     pub fn new(endpoint: String) -> Self {
+        assert!(
+            endpoint.starts_with("http://") || endpoint.starts_with("https://"),
+            "NER endpoint must start with http:// or https://, got: {endpoint}"
+        );
         Self {
             client: reqwest::Client::builder()
+                .connect_timeout(Duration::from_secs(3))
                 .timeout(Duration::from_secs(5))
                 .build()
                 .expect("failed to build NER reqwest client"),
@@ -89,13 +94,22 @@ impl NerClient {
             return Vec::new();
         }
 
-        // Check cache by text hash.
+        // Check cache by text hash, evicting expired entries.
         let hash = hash_text(text);
-        if let Some((cached_at, detections)) = self.cache.get(&hash) {
-            if cached_at.elapsed() < self.cache_ttl {
+        let expired = self
+            .cache
+            .get(&hash)
+            .map(|(cached_at, _)| cached_at.elapsed() >= self.cache_ttl);
+        match expired {
+            Some(false) => {
+                let detections = &self.cache[&hash].1;
                 debug!(hash, count = detections.len(), "NER cache hit");
                 return detections.clone();
             }
+            Some(true) => {
+                self.cache.remove(&hash);
+            }
+            None => {}
         }
 
         let url = format!("{}/api/v1/ner/detect", self.endpoint.trim_end_matches('/'));

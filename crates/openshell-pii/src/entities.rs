@@ -36,6 +36,8 @@ pub enum EntityType {
     MedicalTerm,
     Location,
     NationalId,
+    /// User-defined custom pattern (name carried in PiiDetection metadata).
+    Custom,
 }
 
 impl fmt::Display for EntityType {
@@ -58,6 +60,7 @@ impl fmt::Display for EntityType {
             Self::MedicalTerm => write!(f, "medical_term"),
             Self::Location => write!(f, "location"),
             Self::NationalId => write!(f, "national_id"),
+            Self::Custom => write!(f, "custom"),
         }
     }
 }
@@ -83,6 +86,7 @@ impl EntityType {
             "medical_term" | "medical" => Some(Self::MedicalTerm),
             "location" | "loc" | "gpe" => Some(Self::Location),
             "national_id" => Some(Self::NationalId),
+            "custom" => Some(Self::Custom),
             _ => None,
         }
     }
@@ -231,7 +235,7 @@ pub fn builtin_patterns() -> Vec<EntityPattern> {
         EntityPattern {
             entity_type: EntityType::AwsSecretKey,
             regex: &RE_AWS_SECRET_KEY,
-            confidence: 0.7,
+            confidence: 0.4, // Low confidence: pattern matches many base64 strings (commit SHAs, UUIDs)
             validator: None,
         },
         EntityPattern {

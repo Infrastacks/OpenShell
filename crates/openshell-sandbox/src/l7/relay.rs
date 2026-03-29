@@ -129,7 +129,7 @@ where
                     "PACKAGE_INSTALL"
                 );
 
-                // Emit events.jsonl for agent telemetry pipeline
+                // Emit events.jsonl for agent telemetry pipeline (async I/O)
                 if let Some(ref events_path) = ctx.events_path {
                     let event_type = if result.decision == openshell_supply_chain::Decision::Deny {
                         "package.blocked"
@@ -161,17 +161,11 @@ where
                             "denialReason": result.denial_reason.as_deref().unwrap_or(""),
                         }
                     });
-                    if let Ok(mut f) = std::fs::OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(events_path)
-                    {
-                        use std::io::Write;
-                        let _ = writeln!(f, "{}", event);
-
-                        // Emit individual package.vulnerability events for each vuln found
-                        for vuln in &result.vulnerabilities {
-                            let vuln_event = serde_json::json!({
+                    let vuln_events: Vec<serde_json::Value> = result
+                        .vulnerabilities
+                        .iter()
+                        .map(|vuln| {
+                            serde_json::json!({
                                 "eventType": "package.vulnerability",
                                 "timestamp": &now,
                                 "data": {
@@ -183,10 +177,10 @@ where
                                     "summary": vuln.summary,
                                     "fixedVersion": vuln.fixed_version.as_deref().unwrap_or(""),
                                 }
-                            });
-                            let _ = writeln!(f, "{}", vuln_event);
-                        }
-                    }
+                            })
+                        })
+                        .collect();
+                    emit_supply_chain_events(events_path, &event, &vuln_events).await;
                 }
 
                 if result.decision == openshell_supply_chain::Decision::Deny {
@@ -239,7 +233,7 @@ where
                 .await?;
 
                 match &pii_result {
-                    crate::l7::rest::PiiRelayResult::Blocked => {
+                    crate::l7::rest::PiiRelayResult::Blocked(entity_types) => {
                         info!(
                             dst_host = %ctx.host,
                             dst_port = ctx.port,
@@ -248,6 +242,7 @@ where
                             pii_action = "block",
                             "PII_DETECTION"
                         );
+                        emit_pii_event(ctx, "pii.blocked", "block", entity_types.len(), entity_types).await;
                         crate::l7::rest::RestProvider
                             .deny(
                                 &req,
@@ -258,7 +253,7 @@ where
                             .await?;
                         return Ok(());
                     }
-                    crate::l7::rest::PiiRelayResult::Redacted(count) => {
+                    crate::l7::rest::PiiRelayResult::Redacted(count, entity_types) => {
                         info!(
                             dst_host = %ctx.host,
                             dst_port = ctx.port,
@@ -268,8 +263,9 @@ where
                             pii_redaction_count = count,
                             "PII_DETECTION"
                         );
+                        emit_pii_event(ctx, "pii.redacted", "redact", *count, entity_types).await;
                     }
-                    crate::l7::rest::PiiRelayResult::Audited(count) => {
+                    crate::l7::rest::PiiRelayResult::Audited(count, entity_types) => {
                         info!(
                             dst_host = %ctx.host,
                             dst_port = ctx.port,
@@ -279,6 +275,7 @@ where
                             pii_entities_found = count,
                             "PII_DETECTION"
                         );
+                        emit_pii_event(ctx, "pii.detection", "audit", *count, entity_types).await;
                     }
                     crate::l7::rest::PiiRelayResult::Clean => {}
                 }
@@ -379,4 +376,69 @@ fn evaluate_l7_request(
     };
 
     Ok((allowed, reason))
+}
+
+/// Emit a PII detection event to events.jsonl (async I/O).
+async fn emit_pii_event(
+    ctx: &L7EvalContext,
+    event_type: &str,
+    action: &str,
+    entity_count: usize,
+    entity_types: &[String],
+) {
+    let Some(ref events_path) = ctx.events_path else {
+        return;
+    };
+    let now = crate::l7::utc_now_rfc3339();
+    let event = serde_json::json!({
+        "eventType": event_type,
+        "timestamp": now,
+        "data": {
+            "action": action,
+            "entityCount": entity_count,
+            "entityTypes": entity_types,
+            "host": ctx.host,
+            "port": ctx.port,
+        }
+    });
+    let line = format!("{event}\n");
+    let path = events_path.clone();
+    // Write on a blocking thread to avoid stalling the async runtime.
+    let _ = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = f.write_all(line.as_bytes());
+        }
+    })
+    .await;
+}
+
+/// Emit supply chain events to events.jsonl (async I/O).
+async fn emit_supply_chain_events(
+    events_path: &std::path::Path,
+    event_json: &serde_json::Value,
+    vuln_events: &[serde_json::Value],
+) {
+    let mut lines = String::new();
+    use std::fmt::Write;
+    let _ = writeln!(lines, "{event_json}");
+    for v in vuln_events {
+        let _ = writeln!(lines, "{v}");
+    }
+    let path = events_path.to_path_buf();
+    let _ = tokio::task::spawn_blocking(move || {
+        use std::io::Write;
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(&path)
+        {
+            let _ = f.write_all(lines.as_bytes());
+        }
+    })
+    .await;
 }

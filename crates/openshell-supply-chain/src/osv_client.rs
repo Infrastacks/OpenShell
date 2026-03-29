@@ -54,6 +54,18 @@ pub struct Vulnerability {
     pub severity: Vec<OsvSeverity>,
     #[serde(default)]
     pub affected: Vec<OsvAffected>,
+    /// Database-specific metadata (e.g., GitHub Advisory severity label).
+    #[serde(default)]
+    pub database_specific: Option<DatabaseSpecific>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DatabaseSpecific {
+    /// Human-readable severity from the advisory database (e.g., "CRITICAL",
+    /// "HIGH", "MODERATE", "LOW"). Used as fallback when CVSS vectors can't
+    /// be parsed to a numeric score.
+    #[serde(default)]
+    pub severity: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -223,9 +235,9 @@ impl OsvClient {
         for vuln in vulns {
             let severity = classify_severity(vuln);
             match severity.as_str() {
-                "critical" => critical += 1,
-                "high" => high += 1,
-                "medium" => medium += 1,
+                "CRITICAL" => critical += 1,
+                "HIGH" => high += 1,
+                "MEDIUM" => medium += 1,
                 _ => low += 1,
             }
         }
@@ -250,21 +262,117 @@ pub fn extract_fixed_version(vuln: &Vulnerability) -> Option<String> {
 
 /// Classify a vulnerability severity from its CVSS score or metadata.
 pub fn classify_severity(vuln: &Vulnerability) -> String {
+    // Try numeric CVSS score first, then CVSS vector string.
     for sev in &vuln.severity {
         if sev.severity_type == "CVSS_V3" || sev.severity_type == "CVSS_V2" {
+            // Plain numeric score (e.g., "9.8")
             if let Ok(score) = sev.score.parse::<f32>() {
-                return match score {
-                    s if s >= 9.0 => "critical",
-                    s if s >= 7.0 => "high",
-                    s if s >= 4.0 => "medium",
-                    _ => "low",
-                }
-                .to_string();
+                return cvss_score_to_label(score);
+            }
+            // CVSS vector string (e.g., "CVSS:3.1/AV:N/AC:L/...")
+            if let Some(score) = parse_cvss_base_score(&sev.score) {
+                return cvss_score_to_label(score);
             }
         }
     }
-    // Default to medium if no CVSS score available.
-    "medium".to_string()
+    // Fallback: use database_specific.severity (e.g., "CRITICAL", "HIGH",
+    // "MODERATE"). GitHub Advisory Database always provides this.
+    if let Some(ref db) = vuln.database_specific {
+        if let Some(ref label) = db.severity {
+            return match label.to_ascii_uppercase().as_str() {
+                "CRITICAL" => "CRITICAL",
+                "HIGH" => "HIGH",
+                "MODERATE" | "MEDIUM" => "MEDIUM",
+                "LOW" => "LOW",
+                _ => "MEDIUM",
+            }
+            .to_string();
+        }
+    }
+    "MEDIUM".to_string()
+}
+
+fn cvss_score_to_label(score: f32) -> String {
+    match score {
+        s if s >= 9.0 => "CRITICAL",
+        s if s >= 7.0 => "HIGH",
+        s if s >= 4.0 => "MEDIUM",
+        _ => "LOW",
+    }
+    .to_string()
+}
+
+/// Extract the base score from a CVSS v3 vector string.
+///
+/// Computes an approximate CVSS 3.x base score from the vector components.
+/// Uses the simplified scoring approach: maps each metric to its weight and
+/// computes the exploitability and impact sub-scores.
+fn parse_cvss_base_score(vector: &str) -> Option<f32> {
+    if !vector.starts_with("CVSS:3") {
+        return None;
+    }
+    let mut av = 0.85_f32; // Network
+    let mut ac = 0.77;     // Low
+    let mut pr = 0.85;     // None
+    let mut ui = 0.85;     // None
+    let mut scope_changed = false;
+    let mut conf = 0.0_f32;
+    let mut integ = 0.0_f32;
+    let mut avail = 0.0_f32;
+
+    for part in vector.split('/') {
+        match part {
+            "AV:N" => av = 0.85,
+            "AV:A" => av = 0.62,
+            "AV:L" => av = 0.55,
+            "AV:P" => av = 0.20,
+            "AC:L" => ac = 0.77,
+            "AC:H" => ac = 0.44,
+            "PR:N" => pr = 0.85,
+            "PR:L" => pr = if scope_changed { 0.68 } else { 0.62 },
+            "PR:H" => pr = if scope_changed { 0.50 } else { 0.27 },
+            "UI:N" => ui = 0.85,
+            "UI:R" => ui = 0.62,
+            "S:U" => scope_changed = false,
+            "S:C" => scope_changed = true,
+            "C:H" => conf = 0.56,
+            "C:L" => conf = 0.22,
+            "C:N" => conf = 0.0,
+            "I:H" => integ = 0.56,
+            "I:L" => integ = 0.22,
+            "I:N" => integ = 0.0,
+            "A:H" => avail = 0.56,
+            "A:L" => avail = 0.22,
+            "A:N" => avail = 0.0,
+            _ => {}
+        }
+    }
+    // Re-evaluate PR after scope is known
+    for part in vector.split('/') {
+        match part {
+            "PR:L" => pr = if scope_changed { 0.68 } else { 0.62 },
+            "PR:H" => pr = if scope_changed { 0.50 } else { 0.27 },
+            _ => {}
+        }
+    }
+
+    let iss = 1.0 - ((1.0 - conf) * (1.0 - integ) * (1.0 - avail));
+    let impact = if scope_changed {
+        7.52 * (iss - 0.029) - 3.25 * (iss - 0.02).powf(15.0)
+    } else {
+        6.42 * iss
+    };
+    if impact <= 0.0 {
+        return Some(0.0);
+    }
+    let exploitability = 8.22 * av * ac * pr * ui;
+    let score = if scope_changed {
+        (1.08 * (impact + exploitability)).min(10.0)
+    } else {
+        (impact + exploitability).min(10.0)
+    };
+    // Round up to one decimal
+    Some((score * 10.0).ceil() / 10.0)
 }
 
 #[cfg(test)]
@@ -281,8 +389,9 @@ mod tests {
                 score: "9.8".to_string(),
             }],
             affected: vec![],
+            database_specific: None,
         };
-        assert_eq!(classify_severity(&vuln), "critical");
+        assert_eq!(classify_severity(&vuln), "CRITICAL");
     }
 
     #[test]
@@ -295,8 +404,9 @@ mod tests {
                 score: "7.5".to_string(),
             }],
             affected: vec![],
+            database_specific: None,
         };
-        assert_eq!(classify_severity(&vuln), "high");
+        assert_eq!(classify_severity(&vuln), "HIGH");
     }
 
     #[test]
@@ -310,6 +420,7 @@ mod tests {
                     score: "9.8".into(),
                 }],
                 affected: vec![],
+                database_specific: None,
             },
             Vulnerability {
                 id: "B".into(),
@@ -319,12 +430,14 @@ mod tests {
                     score: "7.0".into(),
                 }],
                 affected: vec![],
+                database_specific: None,
             },
             Vulnerability {
                 id: "C".into(),
                 summary: String::new(),
                 severity: vec![],
                 affected: vec![],
+                database_specific: None,
             },
         ];
         let (c, h, m, l) = OsvClient::count_by_severity(&vulns);

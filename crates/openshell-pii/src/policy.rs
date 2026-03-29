@@ -142,3 +142,114 @@ pub enum PiiApplyResult {
         detections: Vec<PiiDetection>,
     },
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn action_for_defaults_to_enforcement() {
+        let policy = PiiPolicy {
+            enforcement: "redact".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(policy.action_for(EntityType::Ssn), PiiAction::Redact);
+        assert_eq!(policy.action_for(EntityType::Email), PiiAction::Redact);
+    }
+
+    #[test]
+    fn action_for_entity_override() {
+        let mut entities = HashMap::new();
+        entities.insert(EntityType::CreditCard, PiiAction::Block);
+        let policy = PiiPolicy {
+            enforcement: "audit".to_string(),
+            entities,
+            ..Default::default()
+        };
+        assert_eq!(policy.action_for(EntityType::CreditCard), PiiAction::Block);
+        assert_eq!(policy.action_for(EntityType::Ssn), PiiAction::Audit);
+    }
+
+    #[test]
+    fn action_for_block_enforcement() {
+        let policy = PiiPolicy {
+            enforcement: "block".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(policy.action_for(EntityType::Email), PiiAction::Block);
+    }
+
+    #[test]
+    fn action_for_unknown_enforcement_falls_back_to_audit() {
+        let policy = PiiPolicy {
+            enforcement: "unknown".to_string(),
+            ..Default::default()
+        };
+        assert_eq!(policy.action_for(EntityType::Ssn), PiiAction::Audit);
+    }
+
+    #[test]
+    fn default_policy_values() {
+        let p = PiiPolicy::default();
+        assert_eq!(p.enforcement, "audit");
+        assert_eq!(p.max_body_bytes, 1_048_576);
+        assert!(p.entities.is_empty());
+        assert!(p.custom_patterns.is_empty());
+        assert!(p.ner_endpoint.is_none());
+        assert!((p.ner_min_confidence - 0.7).abs() < f32::EPSILON);
+        assert!(!p.ner_async);
+    }
+
+    #[test]
+    fn serde_round_trip() {
+        let yaml = r#"
+enforcement: redact
+max_body_bytes: 2097152
+entities:
+  ssn: block
+  credit_card: redact
+custom_patterns:
+  - name: employee_id
+    pattern: "EMP-\\d{6}"
+    action: redact
+ner_endpoint: "http://ner:8080"
+ner_min_confidence: 0.8
+ner_async: true
+"#;
+        let policy: PiiPolicy = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(policy.enforcement, "redact");
+        assert_eq!(policy.max_body_bytes, 2_097_152);
+        assert_eq!(
+            policy.entities.get(&EntityType::Ssn),
+            Some(&PiiAction::Block)
+        );
+        assert_eq!(
+            policy.entities.get(&EntityType::CreditCard),
+            Some(&PiiAction::Redact)
+        );
+        assert_eq!(policy.custom_patterns.len(), 1);
+        assert_eq!(policy.custom_patterns[0].name, "employee_id");
+        assert_eq!(policy.ner_endpoint.as_deref(), Some("http://ner:8080"));
+        assert!((policy.ner_min_confidence - 0.8).abs() < f32::EPSILON);
+        assert!(policy.ner_async);
+
+        // Round-trip through JSON
+        let json = serde_json::to_string(&policy).unwrap();
+        let restored: PiiPolicy = serde_json::from_str(&json).unwrap();
+        assert_eq!(restored.enforcement, "redact");
+        assert_eq!(restored.max_body_bytes, 2_097_152);
+    }
+
+    #[test]
+    fn pii_detection_debug_redacts_matched_text() {
+        let det = PiiDetection {
+            entity_type: EntityType::Ssn,
+            span: 0..11,
+            matched_text: "123-45-6789".to_string(),
+            confidence: 0.95,
+        };
+        let debug = format!("{det:?}");
+        assert!(debug.contains("[REDACTED]"));
+        assert!(!debug.contains("123-45-6789"));
+    }
+}

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU32;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tracing::{debug, info, warn};
@@ -148,7 +148,10 @@ impl ProxyHandle {
             ));
         }
 
-        let listener = TcpListener::bind(http_addr).await.into_diagnostic()?;
+        let socket = tokio::net::TcpSocket::new_v4().into_diagnostic()?;
+        socket.set_reuseaddr(true).into_diagnostic()?;
+        socket.bind(http_addr).into_diagnostic()?;
+        let listener = socket.listen(1024).into_diagnostic()?;
         let local_addr = listener.local_addr().into_diagnostic()?;
         info!(addr = %local_addr, "Proxy listening (tcp)");
 
@@ -411,7 +414,7 @@ async fn handle_tcp_connection(
             &deny_reason,
             "connect",
         );
-        respond(&mut client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+        respond_deny(&mut client, &deny_reason).await?;
         return Ok(());
     }
 
@@ -445,7 +448,7 @@ async fn handle_tcp_connection(
                         &reason,
                         "ssrf",
                     );
-                    respond(&mut client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+                    respond_deny(&mut client, &reason).await?;
                     return Ok(());
                 }
             },
@@ -465,7 +468,7 @@ async fn handle_tcp_connection(
                     &reason,
                     "ssrf",
                 );
-                respond(&mut client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+                respond_deny(&mut client, &reason).await?;
                 return Ok(());
             }
         }
@@ -491,7 +494,7 @@ async fn handle_tcp_connection(
                     &reason,
                     "ssrf",
                 );
-                respond(&mut client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+                respond_deny(&mut client, &reason).await?;
                 return Ok(());
             }
         }
@@ -1707,7 +1710,7 @@ async fn handle_forward_proxy(
                 reason,
                 "forward",
             );
-            respond(client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+            respond_deny(client, reason).await?;
             return Ok(());
         }
     };
@@ -1737,7 +1740,7 @@ async fn handle_forward_proxy(
             "endpoint has L7 rules configured; forward proxy bypasses L7 inspection — use CONNECT",
             "forward-l7-bypass",
         );
-        respond(client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+        respond_deny(client, "endpoint has L7 rules; use CONNECT tunnel").await?;
         return Ok(());
     }
 
@@ -1768,7 +1771,7 @@ async fn handle_forward_proxy(
                         &reason,
                         "ssrf",
                     );
-                    respond(client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+                    respond_deny(client, &reason).await?;
                     return Ok(());
                 }
             },
@@ -1788,7 +1791,7 @@ async fn handle_forward_proxy(
                     &reason,
                     "ssrf",
                 );
-                respond(client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+                respond_deny(client, &reason).await?;
                 return Ok(());
             }
         }
@@ -1812,7 +1815,7 @@ async fn handle_forward_proxy(
                     &reason,
                     "ssrf",
                 );
-                respond(client, b"HTTP/1.1 403 Forbidden\r\n\r\n").await?;
+                respond_deny(client, &reason).await?;
                 return Ok(());
             }
         }
@@ -1877,6 +1880,24 @@ fn parse_target(target: &str) -> Result<(String, u16)> {
 
 async fn respond(client: &mut TcpStream, bytes: &[u8]) -> Result<()> {
     client.write_all(bytes).await.into_diagnostic()?;
+    Ok(())
+}
+
+/// Send a 403 deny response with the reason in the HTTP status line.
+///
+/// Formats as `HTTP/1.1 403 Blocked: <reason>\r\n\r\n` so clients like pip
+/// and curl display the denial reason to the user instead of a bare "Forbidden".
+async fn respond_deny(client: &mut TcpStream, reason: &str) -> Result<()> {
+    let clean: String = reason
+        .chars()
+        .filter(|c| *c != '\r' && *c != '\n' && *c != '\0')
+        .take(200)
+        .collect();
+    let response = format!("HTTP/1.1 403 Blocked: {clean}\r\n\r\n");
+    client
+        .write_all(response.as_bytes())
+        .await
+        .into_diagnostic()?;
     Ok(())
 }
 
