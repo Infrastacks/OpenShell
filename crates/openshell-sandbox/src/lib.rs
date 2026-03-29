@@ -252,36 +252,57 @@ pub async fn run_sandbox(
         (None, None)
     };
 
-    // Create network namespace for proxy mode (Linux only)
+    // Create network namespace for proxy mode (Linux only).
     // This must be created before the proxy AND SSH server so that SSH
     // sessions can enter the namespace for network isolation.
+    //
+    // When OPENSHELL_NO_NETNS=1, skip namespace creation and run the proxy
+    // in cooperative mode — enforcement relies on HTTP_PROXY env vars rather
+    // than mandatory kernel-level isolation.  This is appropriate for managed
+    // containers that lack CAP_NET_ADMIN / CAP_SYS_ADMIN (e.g. standard K8s
+    // pods) where all outbound processes are started with proxy env vars and
+    // there is no direct user shell access.
     #[cfg(target_os = "linux")]
     let netns = if matches!(policy.network.mode, NetworkMode::Proxy) {
-        match NetworkNamespace::create() {
-            Ok(ns) => {
-                // Install bypass detection rules (iptables LOG + REJECT).
-                // This provides fast-fail UX and diagnostic logging for direct
-                // connection attempts that bypass the HTTP CONNECT proxy.
-                let proxy_port = policy
-                    .network
-                    .proxy
-                    .as_ref()
-                    .and_then(|p| p.http_addr)
-                    .map_or(3128, |addr| addr.port());
-                if let Err(e) = ns.install_bypass_rules(proxy_port) {
-                    warn!(
-                        error = %e,
-                        "Failed to install bypass detection rules (non-fatal)"
-                    );
+        let skip_netns = std::env::var("OPENSHELL_NO_NETNS")
+            .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+            .unwrap_or(false);
+
+        if skip_netns {
+            warn!(
+                "Network namespace creation skipped (OPENSHELL_NO_NETNS=1). \
+                 Proxy enforcement is cooperative — processes that ignore HTTP_PROXY \
+                 can bypass L7 inspection."
+            );
+            None
+        } else {
+            match NetworkNamespace::create() {
+                Ok(ns) => {
+                    // Install bypass detection rules (iptables LOG + REJECT).
+                    // This provides fast-fail UX and diagnostic logging for direct
+                    // connection attempts that bypass the HTTP CONNECT proxy.
+                    let proxy_port = policy
+                        .network
+                        .proxy
+                        .as_ref()
+                        .and_then(|p| p.http_addr)
+                        .map_or(3128, |addr| addr.port());
+                    if let Err(e) = ns.install_bypass_rules(proxy_port) {
+                        warn!(
+                            error = %e,
+                            "Failed to install bypass detection rules (non-fatal)"
+                        );
+                    }
+                    Some(ns)
                 }
-                Some(ns)
-            }
-            Err(e) => {
-                return Err(miette::miette!(
-                    "Network namespace creation failed and proxy mode requires isolation. \
-                     Ensure CAP_NET_ADMIN and CAP_SYS_ADMIN are available and iproute2 is installed. \
-                     Error: {e}"
-                ));
+                Err(e) => {
+                    return Err(miette::miette!(
+                        "Network namespace creation failed and proxy mode requires isolation. \
+                         Ensure CAP_NET_ADMIN and CAP_SYS_ADMIN are available and iproute2 is \
+                         installed, or set OPENSHELL_NO_NETNS=1 for cooperative proxy mode. \
+                         Error: {e}"
+                    ));
+                }
             }
         }
     } else {
