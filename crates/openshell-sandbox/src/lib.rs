@@ -159,8 +159,8 @@ pub async fn run_sandbox(
     ssh_listen_addr: Option<String>,
     ssh_handshake_secret: Option<String>,
     ssh_handshake_skew_secs: u64,
-    _health_check: bool,
-    _health_port: u16,
+    health_check: bool,
+    health_port: u16,
     inference_routes: Option<String>,
 ) -> Result<i32> {
     let (program, args) = command
@@ -377,6 +377,55 @@ pub async fn run_sandbox(
     } else {
         (None, None, None)
     };
+
+    // Spawn health check HTTP server if enabled.
+    // Provides a simple /healthz endpoint for container orchestrators (K8s
+    // liveness/readiness probes) and entrypoint readiness checks.
+    //
+    // Security: binds to loopback only, per-connection timeout to prevent
+    // slowloris, spawns each connection to avoid blocking the accept loop.
+    if health_check {
+        let addr: SocketAddr = ([127, 0, 0, 1], health_port).into();
+        tokio::spawn(async move {
+            let listener = match tokio::net::TcpListener::bind(addr).await {
+                Ok(l) => {
+                    info!(addr = %addr, "Health check server listening");
+                    l
+                }
+                Err(e) => {
+                    warn!(error = %e, addr = %addr, "Failed to bind health check server");
+                    return;
+                }
+            };
+            loop {
+                let (stream, _) = match listener.accept().await {
+                    Ok(conn) => conn,
+                    Err(e) => {
+                        tracing::debug!(error = %e, "Health check accept error");
+                        continue;
+                    }
+                };
+                // Spawn per-connection with a hard timeout to prevent resource
+                // exhaustion from slow or malicious clients.
+                tokio::spawn(async move {
+                    let result = tokio::time::timeout(Duration::from_secs(5), async {
+                        let mut stream = stream;
+                        // Drain up to 4 KiB of the request before responding.
+                        // Prevents the response from being sent before the client
+                        // finishes writing (which can cause RST on some stacks).
+                        let mut buf = [0u8; 4096];
+                        let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
+                        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                        let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response).await;
+                    })
+                    .await;
+                    if result.is_err() {
+                        tracing::debug!("Health check connection timed out");
+                    }
+                });
+            }
+        });
+    }
 
     // Spawn bypass detection monitor (Linux only, proxy mode only).
     // Reads /dev/kmsg for iptables LOG entries and emits structured
