@@ -21,11 +21,7 @@ pub enum LicenseStatus {
 /// 2. If explicitly allowed → `Allowed`
 /// 3. If allow list is non-empty and not matched → `Denied` (allowlist is restrictive)
 /// 4. If allow list is empty → `Unknown`
-pub fn check_license(
-    license: &str,
-    allowed: &[String],
-    denied: &[String],
-) -> LicenseStatus {
+pub fn check_license(license: &str, allowed: &[String], denied: &[String]) -> LicenseStatus {
     // Check deny list first.
     for pattern in denied {
         if glob_match(pattern, license) {
@@ -111,10 +107,7 @@ mod tests {
     #[test]
     fn not_in_allowlist_denied() {
         let allowed = vec!["MIT".to_string()];
-        assert_eq!(
-            check_license("ISC", &allowed, &[]),
-            LicenseStatus::Denied
-        );
+        assert_eq!(check_license("ISC", &allowed, &[]), LicenseStatus::Denied);
     }
 
     #[test]

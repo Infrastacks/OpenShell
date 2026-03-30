@@ -138,9 +138,7 @@ pub enum PiiApplyResult {
         detections: Vec<PiiDetection>,
     },
     /// PII detected, request/response should be blocked.
-    Blocked {
-        detections: Vec<PiiDetection>,
-    },
+    Blocked { detections: Vec<PiiDetection> },
 }
 
 #[cfg(test)]

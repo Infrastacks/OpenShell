@@ -12,8 +12,8 @@ use crate::secrets::{SecretResolver, rewrite_header_line};
 use miette::{IntoDiagnostic, Result};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -191,12 +191,14 @@ impl SharedSupplyChainRuntime {
             return Ok(None);
         }
 
-        let yaml = std::fs::read_to_string(path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        let yaml =
+            std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
         match openshell_policy::parse_supply_chain_policy(&yaml) {
             Ok(Some(def)) => {
                 let policy = supply_chain_policy_from_def(&def);
-                Ok(Some(openshell_supply_chain::SupplyChainEngine::new(&policy)))
+                Ok(Some(openshell_supply_chain::SupplyChainEngine::new(
+                    &policy,
+                )))
             }
             Ok(None) => Ok(None),
             Err(e) => Err(format!("parse supply chain policy: {e}")),
@@ -264,7 +266,15 @@ impl ProxyHandle {
                         let supply_chain = supply_chain_runtime.clone();
                         tokio::spawn(async move {
                             if let Err(err) = handle_tcp_connection(
-                                stream, opa, cache, spid, tls, inf, resolver, dtx, supply_chain,
+                                stream,
+                                opa,
+                                cache,
+                                spid,
+                                tls,
+                                inf,
+                                resolver,
+                                dtx,
+                                supply_chain,
                             )
                             .await
                             {
@@ -2133,10 +2143,7 @@ supply_chain:
 
         let runtime = SharedSupplyChainRuntime::new(policy_path.clone());
         let first = runtime.engine_for_tunnel().unwrap();
-        let previous = std::fs::metadata(&policy_path)
-            .unwrap()
-            .modified()
-            .unwrap();
+        let previous = std::fs::metadata(&policy_path).unwrap().modified().unwrap();
         rewrite_policy_with_new_mtime(
             &policy_path,
             r#"
@@ -2163,10 +2170,7 @@ supply_chain:
 
         let runtime = SharedSupplyChainRuntime::new(policy_path.clone());
         let first = runtime.engine_for_tunnel().unwrap();
-        let previous = std::fs::metadata(&policy_path)
-            .unwrap()
-            .modified()
-            .unwrap();
+        let previous = std::fs::metadata(&policy_path).unwrap().modified().unwrap();
         rewrite_policy_with_new_mtime(&policy_path, "not: [valid", Some(previous));
 
         let second = runtime.engine_for_tunnel().unwrap();

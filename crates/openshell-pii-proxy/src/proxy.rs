@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use crate::policy::{SharedEngine, SharedNerClient};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
@@ -31,7 +34,11 @@ pub async fn handle(
     req: Request<hyper::body::Incoming>,
 ) -> Result<Response<Full<Bytes>>, hyper::Error> {
     let method = req.method().clone();
-    let path = req.uri().path_and_query().map(|pq| pq.as_str().to_string()).unwrap_or_default();
+    let path = req
+        .uri()
+        .path_and_query()
+        .map(|pq| pq.as_str().to_string())
+        .unwrap_or_default();
     let headers = req.headers().clone();
 
     // Collect request body.
@@ -39,7 +46,10 @@ pub async fn handle(
         Ok(collected) => collected.to_bytes(),
         Err(e) => {
             tracing::error!(error = %e, "Failed to read request body");
-            return Ok(error_response(StatusCode::BAD_GATEWAY, "Failed to read request body"));
+            return Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                "Failed to read request body",
+            ));
         }
     };
 
@@ -84,12 +94,8 @@ pub async fn handle(
     };
 
     match scan_result {
-        None => {
-            forward(&state, method, &path, &headers, body_bytes).await
-        }
-        Some(PiiApplyResult::Clean) => {
-            forward(&state, method, &path, &headers, body_bytes).await
-        }
+        None => forward(&state, method, &path, &headers, body_bytes).await,
+        Some(PiiApplyResult::Clean) => forward(&state, method, &path, &headers, body_bytes).await,
         Some(PiiApplyResult::Audited(ref _dets)) => {
             info!(
                 engine = "pii",
@@ -155,7 +161,11 @@ async fn forward(
         Ok(resp) => {
             let status = resp.status();
             let resp_headers = resp.headers().clone();
-            let resp_body = resp.collect().await.map(|c| c.to_bytes()).unwrap_or_default();
+            let resp_body = resp
+                .collect()
+                .await
+                .map(|c| c.to_bytes())
+                .unwrap_or_default();
 
             let mut response = Response::builder().status(status);
             for (key, value) in resp_headers.iter() {
@@ -165,7 +175,10 @@ async fn forward(
         }
         Err(e) => {
             tracing::error!(error = %e, uri = %uri, "Upstream request failed");
-            Ok(error_response(StatusCode::BAD_GATEWAY, &format!("Upstream error: {e}")))
+            Ok(error_response(
+                StatusCode::BAD_GATEWAY,
+                &format!("Upstream error: {e}"),
+            ))
         }
     }
 }
@@ -187,7 +200,9 @@ fn emit_events(
     action_map: &HashMap<openshell_pii::EntityType, String>,
     default_action: &str,
 ) {
-    let Some(ref path) = state.events_path else { return };
+    let Some(ref path) = state.events_path else {
+        return;
+    };
 
     let mut file = match OpenOptions::new().append(true).create(true).open(path) {
         Ok(f) => f,

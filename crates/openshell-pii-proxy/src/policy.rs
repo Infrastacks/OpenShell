@@ -1,3 +1,6 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 use openshell_pii::{CustomPattern, EntityType, NerClient, PiiAction, PiiEngine, PiiPolicy};
 use serde::Deserialize;
 use std::collections::HashMap;
@@ -96,8 +99,10 @@ fn section_to_policy(sec: &PiiSection) -> PiiPolicy {
 
 /// Load a PII engine from a YAML policy file. Returns `None` if the file has no `pii` section.
 pub fn load_engine(path: &Path) -> Result<Option<PiiEngine>, String> {
-    let content = std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
-    let file: PolicyFile = serde_yaml::from_str(&content).map_err(|e| format!("parse YAML: {e}"))?;
+    let content =
+        std::fs::read_to_string(path).map_err(|e| format!("read {}: {e}", path.display()))?;
+    let file: PolicyFile =
+        serde_yaml::from_str(&content).map_err(|e| format!("parse YAML: {e}"))?;
     Ok(file.pii.as_ref().map(|sec| {
         let policy = section_to_policy(sec);
         PiiEngine::new(&policy)
@@ -159,10 +164,14 @@ pub fn spawn_watcher(
     ner_client: SharedNerClient,
 ) -> tokio::task::JoinHandle<()> {
     tokio::spawn(async move {
-        let mut last_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+        let mut last_mtime = std::fs::metadata(&path)
+            .ok()
+            .and_then(|m| m.modified().ok());
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
-            let current_mtime = std::fs::metadata(&path).ok().and_then(|m| m.modified().ok());
+            let current_mtime = std::fs::metadata(&path)
+                .ok()
+                .and_then(|m| m.modified().ok());
 
             // Detect new file or modified file.
             let changed = match (last_mtime, current_mtime) {

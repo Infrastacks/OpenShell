@@ -15,11 +15,13 @@ mod registry;
 mod version;
 
 pub use denylist::check_denylist;
-pub use license::{check_license, LicenseStatus};
-pub use osv_client::{classify_severity, extract_fixed_version, OsvClient, OsvQueryError, Vulnerability};
+pub use license::{LicenseStatus, check_license};
+pub use osv_client::{
+    OsvClient, OsvQueryError, Vulnerability, classify_severity, extract_fixed_version,
+};
 pub use policy::{
     Decision, DenylistEntry, LicensePolicy, SupplyChainEngine, SupplyChainPolicy,
     SupplyChainResult, VersionPin, VulnCounts, VulnDetail, VulnThresholds,
 };
-pub use registry::{detect_registry_pattern, Ecosystem, RegistryMatch};
+pub use registry::{Ecosystem, RegistryMatch, detect_registry_pattern};
 pub use version::check_version_pin;

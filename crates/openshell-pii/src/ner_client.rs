@@ -172,7 +172,8 @@ impl NerClient {
         };
 
         // Cache the result.
-        self.cache.insert(hash, (Instant::now(), detections.clone()));
+        self.cache
+            .insert(hash, (Instant::now(), detections.clone()));
         detections
     }
 }

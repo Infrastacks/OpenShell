@@ -158,7 +158,11 @@ impl SupplyChainEngine {
                 "Package is on denylist"
             );
             return SupplyChainResult {
-                decision: if enforce { Decision::Deny } else { Decision::Audit },
+                decision: if enforce {
+                    Decision::Deny
+                } else {
+                    Decision::Audit
+                },
                 denial_reason: Some(format!("denylisted: {reason}")),
                 vuln_counts: VulnCounts::default(),
                 license_status: LicenseStatus::Unknown,
@@ -168,9 +172,12 @@ impl SupplyChainEngine {
 
         // 2. Version pinning
         if !version_str.is_empty() {
-            if let Some(reason) =
-                version::check_version_pin(&ecosystem, package, version_str, &self.policy.version_pinning)
-            {
+            if let Some(reason) = version::check_version_pin(
+                &ecosystem,
+                package,
+                version_str,
+                &self.policy.version_pinning,
+            ) {
                 info!(
                     engine = "supply_chain",
                     check = "version_pin",
@@ -181,7 +188,11 @@ impl SupplyChainEngine {
                     "Version pin violated"
                 );
                 return SupplyChainResult {
-                    decision: if enforce { Decision::Deny } else { Decision::Audit },
+                    decision: if enforce {
+                        Decision::Deny
+                    } else {
+                        Decision::Audit
+                    },
                     denial_reason: Some(reason),
                     vuln_counts: VulnCounts::default(),
                     license_status: LicenseStatus::Unknown,
@@ -207,7 +218,15 @@ impl SupplyChainEngine {
                             fixed_version: crate::osv_client::extract_fixed_version(v),
                         })
                         .collect();
-                    (VulnCounts { critical: c, high: h, medium: m, low: l }, details)
+                    (
+                        VulnCounts {
+                            critical: c,
+                            high: h,
+                            medium: m,
+                            low: l,
+                        },
+                        details,
+                    )
                 }
                 Err(e) => {
                     // Fail-closed: if OSV is unreachable in enforce mode, deny.
@@ -255,7 +274,11 @@ impl SupplyChainEngine {
                     "Unfixed critical vulnerability"
                 );
                 return SupplyChainResult {
-                    decision: if enforce { Decision::Deny } else { Decision::Audit },
+                    decision: if enforce {
+                        Decision::Deny
+                    } else {
+                        Decision::Audit
+                    },
                     denial_reason: Some(reason),
                     vuln_counts,
                     license_status,
@@ -271,7 +294,11 @@ impl SupplyChainEngine {
                 vuln_counts.critical, thresholds.max_critical
             );
             return SupplyChainResult {
-                decision: if enforce { Decision::Deny } else { Decision::Audit },
+                decision: if enforce {
+                    Decision::Deny
+                } else {
+                    Decision::Audit
+                },
                 denial_reason: Some(reason),
                 vuln_counts,
                 license_status,
@@ -284,7 +311,11 @@ impl SupplyChainEngine {
                 vuln_counts.high, thresholds.max_high
             );
             return SupplyChainResult {
-                decision: if enforce { Decision::Deny } else { Decision::Audit },
+                decision: if enforce {
+                    Decision::Deny
+                } else {
+                    Decision::Audit
+                },
                 denial_reason: Some(reason),
                 vuln_counts,
                 license_status,
@@ -316,8 +347,8 @@ impl SupplyChainEngine {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::registry::Ecosystem;
     use crate::Vulnerability;
+    use crate::registry::Ecosystem;
 
     #[tokio::test]
     async fn evaluate_uses_seeded_osv_cache() {

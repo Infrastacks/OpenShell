@@ -164,10 +164,7 @@ impl OsvClient {
         // Check cache first. Keep the lock only for map access so outbound OSV
         // requests do not serialize unrelated tunnel traffic.
         {
-            let cache = self
-                .cache
-                .read()
-                .expect("OSV cache read lock poisoned");
+            let cache = self.cache.read().expect("OSV cache read lock poisoned");
             if let Some((cached_at, vulns)) = cache.get(&cache_key) {
                 if cached_at.elapsed() < self.ttl {
                     debug!(cache_key = %cache_key, count = vulns.len(), "OSV cache hit");
@@ -178,10 +175,7 @@ impl OsvClient {
 
         // Best-effort eager eviction for expired entries.
         {
-            let mut cache = self
-                .cache
-                .write()
-                .expect("OSV cache write lock poisoned");
+            let mut cache = self.cache.write().expect("OSV cache write lock poisoned");
             if cache
                 .get(&cache_key)
                 .is_some_and(|(cached_at, _)| cached_at.elapsed() >= self.ttl)
@@ -343,9 +337,9 @@ fn parse_cvss_base_score(vector: &str) -> Option<f32> {
         return None;
     }
     let mut av = 0.85_f32; // Network
-    let mut ac = 0.77;     // Low
-    let mut pr = 0.85;     // None
-    let mut ui = 0.85;     // None
+    let mut ac = 0.77; // Low
+    let mut pr = 0.85; // None
+    let mut ui = 0.85; // None
     let mut scope_changed = false;
     let mut conf = 0.0_f32;
     let mut integ = 0.0_f32;

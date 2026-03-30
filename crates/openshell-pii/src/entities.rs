@@ -134,8 +134,7 @@ static RE_EMAIL: LazyLock<Regex> = LazyLock::new(|| {
 
 static RE_PHONE: LazyLock<Regex> = LazyLock::new(|| {
     // US/intl formats: +1-555-123-4567, (555) 123-4567, 555.123.4567, etc.
-    Regex::new(r"(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b")
-        .expect("phone regex")
+    Regex::new(r"(?:\+?1[-.\s]?)?\(?[2-9]\d{2}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b").expect("phone regex")
 });
 
 static RE_IPV4: LazyLock<Regex> = LazyLock::new(|| {
@@ -375,17 +374,29 @@ mod tests {
     #[test]
     fn ner_entity_types_parse() {
         assert_eq!(EntityType::parse("person"), Some(EntityType::Person));
-        assert_eq!(EntityType::parse("organization"), Some(EntityType::Organization));
+        assert_eq!(
+            EntityType::parse("organization"),
+            Some(EntityType::Organization)
+        );
         assert_eq!(EntityType::parse("org"), Some(EntityType::Organization));
         assert_eq!(EntityType::parse("address"), Some(EntityType::Address));
-        assert_eq!(EntityType::parse("date_of_birth"), Some(EntityType::DateOfBirth));
+        assert_eq!(
+            EntityType::parse("date_of_birth"),
+            Some(EntityType::DateOfBirth)
+        );
         assert_eq!(EntityType::parse("dob"), Some(EntityType::DateOfBirth));
-        assert_eq!(EntityType::parse("medical_term"), Some(EntityType::MedicalTerm));
+        assert_eq!(
+            EntityType::parse("medical_term"),
+            Some(EntityType::MedicalTerm)
+        );
         assert_eq!(EntityType::parse("medical"), Some(EntityType::MedicalTerm));
         assert_eq!(EntityType::parse("location"), Some(EntityType::Location));
         assert_eq!(EntityType::parse("loc"), Some(EntityType::Location));
         assert_eq!(EntityType::parse("gpe"), Some(EntityType::Location));
-        assert_eq!(EntityType::parse("national_id"), Some(EntityType::NationalId));
+        assert_eq!(
+            EntityType::parse("national_id"),
+            Some(EntityType::NationalId)
+        );
     }
 
     #[test]

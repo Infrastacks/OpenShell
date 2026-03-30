@@ -243,11 +243,8 @@ mod tests {
 
     #[test]
     fn npm_scoped_package() {
-        let m = detect_registry_pattern(
-            "registry.npmjs.org",
-            "/@babel/core/-/core-7.24.0.tgz",
-        )
-        .unwrap();
+        let m = detect_registry_pattern("registry.npmjs.org", "/@babel/core/-/core-7.24.0.tgz")
+            .unwrap();
         assert_eq!(m.ecosystem, Ecosystem::Npm);
         assert_eq!(m.package, "@babel/core");
         assert_eq!(m.version, "7.24.0");
@@ -255,11 +252,8 @@ mod tests {
 
     #[test]
     fn npm_unscoped_package() {
-        let m = detect_registry_pattern(
-            "registry.npmjs.org",
-            "/lodash/-/lodash-4.17.21.tgz",
-        )
-        .unwrap();
+        let m =
+            detect_registry_pattern("registry.npmjs.org", "/lodash/-/lodash-4.17.21.tgz").unwrap();
         assert_eq!(m.ecosystem, Ecosystem::Npm);
         assert_eq!(m.package, "lodash");
         assert_eq!(m.version, "4.17.21");
@@ -291,11 +285,8 @@ mod tests {
 
     #[test]
     fn cargo_api() {
-        let m = detect_registry_pattern(
-            "crates.io",
-            "/api/v1/crates/serde/1.0.200/download",
-        )
-        .unwrap();
+        let m =
+            detect_registry_pattern("crates.io", "/api/v1/crates/serde/1.0.200/download").unwrap();
         assert_eq!(m.ecosystem, Ecosystem::Cargo);
         assert_eq!(m.package, "serde");
         assert_eq!(m.version, "1.0.200");

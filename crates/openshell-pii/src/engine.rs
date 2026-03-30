@@ -3,7 +3,7 @@
 
 //! PII detection engine — runs compiled patterns against byte buffers.
 
-use crate::entities::{builtin_patterns, EntityPattern, EntityType};
+use crate::entities::{EntityPattern, EntityType, builtin_patterns};
 use crate::policy::{PiiAction, PiiApplyResult, PiiDetection, PiiPolicy};
 use crate::redactor;
 use regex::Regex;
@@ -37,17 +37,15 @@ impl PiiEngine {
         let custom: Vec<(String, Regex, PiiAction)> = policy
             .custom_patterns
             .iter()
-            .filter_map(|cp| {
-                match Regex::new(&cp.pattern) {
-                    Ok(re) => Some((cp.name.clone(), re, cp.action)),
-                    Err(e) => {
-                        tracing::warn!(
-                            pattern_name = %cp.name,
-                            error = %e,
-                            "Failed to compile custom PII pattern, skipping"
-                        );
-                        None
-                    }
+            .filter_map(|cp| match Regex::new(&cp.pattern) {
+                Ok(re) => Some((cp.name.clone(), re, cp.action)),
+                Err(e) => {
+                    tracing::warn!(
+                        pattern_name = %cp.name,
+                        error = %e,
+                        "Failed to compile custom PII pattern, skipping"
+                    );
+                    None
                 }
             })
             .collect();
@@ -176,9 +174,9 @@ impl PiiEngine {
         }
 
         // Check if any detection triggers a block.
-        let should_block = detections.iter().any(|d| {
-            self.policy.action_for(d.entity_type) == PiiAction::Block
-        });
+        let should_block = detections
+            .iter()
+            .any(|d| self.policy.action_for(d.entity_type) == PiiAction::Block);
 
         if should_block {
             return PiiApplyResult::Blocked {
@@ -210,10 +208,7 @@ impl PiiEngine {
 ///
 /// When two detections overlap in byte range, the one with higher confidence is
 /// kept. Non-overlapping detections from both tiers are preserved as-is.
-pub fn merge_detections(
-    mut regex: Vec<PiiDetection>,
-    ner: Vec<PiiDetection>,
-) -> Vec<PiiDetection> {
+pub fn merge_detections(mut regex: Vec<PiiDetection>, ner: Vec<PiiDetection>) -> Vec<PiiDetection> {
     for ner_det in ner {
         let overlaps = regex.iter().any(|r| spans_overlap(&r.span, &ner_det.span));
         if overlaps {
@@ -291,7 +286,11 @@ mod tests {
         let engine = PiiEngine::new(&audit_policy());
         let body = b"Contact: admin@example.com for help";
         let detections = engine.detect(body);
-        assert!(detections.iter().any(|d| d.entity_type == EntityType::Email));
+        assert!(
+            detections
+                .iter()
+                .any(|d| d.entity_type == EntityType::Email)
+        );
     }
 
     #[test]
@@ -300,7 +299,11 @@ mod tests {
         // 4111111111111111 passes Luhn
         let body = b"Card: 4111111111111111";
         let detections = engine.detect(body);
-        assert!(detections.iter().any(|d| d.entity_type == EntityType::CreditCard));
+        assert!(
+            detections
+                .iter()
+                .any(|d| d.entity_type == EntityType::CreditCard)
+        );
     }
 
     #[test]
@@ -309,7 +312,11 @@ mod tests {
         // 4111111111111112 fails Luhn
         let body = b"Card: 4111111111111112";
         let detections = engine.detect(body);
-        assert!(!detections.iter().any(|d| d.entity_type == EntityType::CreditCard));
+        assert!(
+            !detections
+                .iter()
+                .any(|d| d.entity_type == EntityType::CreditCard)
+        );
     }
 
     #[test]
@@ -317,7 +324,11 @@ mod tests {
         let engine = PiiEngine::new(&audit_policy());
         let body = b"key=AKIAIOSFODNN7EXAMPLE";
         let detections = engine.detect(body);
-        assert!(detections.iter().any(|d| d.entity_type == EntityType::AwsAccessKey));
+        assert!(
+            detections
+                .iter()
+                .any(|d| d.entity_type == EntityType::AwsAccessKey)
+        );
     }
 
     #[test]

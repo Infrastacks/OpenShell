@@ -426,7 +426,8 @@ pub async fn run_sandbox(
                         // finishes writing (which can cause RST on some stacks).
                         let mut buf = [0u8; 4096];
                         let _ = tokio::io::AsyncReadExt::read(&mut stream, &mut buf).await;
-                        let response = b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
+                        let response =
+                            b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nok";
                         let _ = tokio::io::AsyncWriteExt::write_all(&mut stream, response).await;
                     })
                     .await;

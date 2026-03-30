@@ -263,11 +263,10 @@ hide = true
 
 ["python:proto"]
 description = "Generate Python protobuf stubs from .proto files"
-env = { UV_NO_SYNC = "1" }
 run = """
 #!/usr/bin/env bash
 set -euo pipefail
-uv run python -m grpc_tools.protoc \
+uv run --group dev python -m grpc_tools.protoc \
   -Iproto \
   --python_out=python/openshell/_proto \
   --pyi_out=python/openshell/_proto \
@@ -277,7 +276,7 @@ uv run python -m grpc_tools.protoc \
   proto/datamodel.proto \
   proto/sandbox.proto
 # Fix absolute imports in generated stubs to use package-relative imports
-uv run python - <<'PY'
+uv run --group dev python - <<'PY'
 from pathlib import Path
 import re
 

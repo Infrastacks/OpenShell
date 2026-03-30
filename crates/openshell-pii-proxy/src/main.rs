@@ -1,11 +1,14 @@
+// SPDX-FileCopyrightText: Copyright (c) 2025-2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+// SPDX-License-Identifier: Apache-2.0
+
 mod health;
 mod policy;
 mod proxy;
 
 use clap::Parser;
+use hyper::Request;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use hyper::Request;
 use hyper_util::rt::TokioIo;
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -14,14 +17,21 @@ use tokio::net::TcpListener;
 use tracing::info;
 
 #[derive(Parser)]
-#[command(name = "pii-policy-proxy", about = "HTTP reverse proxy with PII detection")]
+#[command(
+    name = "pii-policy-proxy",
+    about = "HTTP reverse proxy with PII detection"
+)]
 struct Args {
     /// Port to listen on.
     #[arg(long, env = "PII_PROXY_PORT", default_value = "9002")]
     port: u16,
 
     /// Upstream URL (the inference transform proxy).
-    #[arg(long, env = "PII_UPSTREAM_URL", default_value = "http://127.0.0.1:9001")]
+    #[arg(
+        long,
+        env = "PII_UPSTREAM_URL",
+        default_value = "http://127.0.0.1:9001"
+    )]
     upstream_url: String,
 
     /// Path to the PII policy YAML file. If absent, starts in passthrough mode.
@@ -29,7 +39,11 @@ struct Args {
     policy_path: Option<PathBuf>,
 
     /// Path to the events JSONL file for telemetry integration.
-    #[arg(long, env = "PII_EVENTS_PATH", default_value = "/sandbox/.nemoclaw/events.jsonl")]
+    #[arg(
+        long,
+        env = "PII_EVENTS_PATH",
+        default_value = "/sandbox/.nemoclaw/events.jsonl"
+    )]
     events_path: PathBuf,
 }
 

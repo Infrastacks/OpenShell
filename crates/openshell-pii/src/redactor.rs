@@ -46,10 +46,7 @@ mod tests {
         let detections = vec![detection(EntityType::Ssn, 7, 18, "123-45-6789")];
         let count = redact(&mut body, &detections);
         assert_eq!(count, 1);
-        assert_eq!(
-            String::from_utf8_lossy(&body),
-            "SSN is [REDACTED:ssn] here"
-        );
+        assert_eq!(String::from_utf8_lossy(&body), "SSN is [REDACTED:ssn] here");
     }
 
     #[test]

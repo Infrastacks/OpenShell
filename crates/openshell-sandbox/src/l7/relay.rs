@@ -242,7 +242,14 @@ where
                             pii_action = "block",
                             "PII_DETECTION"
                         );
-                        emit_pii_event(ctx, "pii.blocked", "block", entity_types.len(), entity_types).await;
+                        emit_pii_event(
+                            ctx,
+                            "pii.blocked",
+                            "block",
+                            entity_types.len(),
+                            entity_types,
+                        )
+                        .await;
                         crate::l7::rest::RestProvider
                             .deny(
                                 &req,
