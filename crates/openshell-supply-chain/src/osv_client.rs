@@ -16,6 +16,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::RwLock;
 use std::time::{Duration, Instant};
 use tracing::{debug, info, warn};
 
@@ -114,7 +115,7 @@ struct OsvResponse {
 /// OSV.dev API client with in-memory cache, proxy bypass, and fail-closed.
 pub struct OsvClient {
     client: reqwest::Client,
-    cache: HashMap<String, (Instant, Vec<Vulnerability>)>,
+    cache: RwLock<HashMap<String, (Instant, Vec<Vulnerability>)>>,
     ttl: Duration,
 }
 
@@ -140,7 +141,7 @@ impl OsvClient {
 
         Self {
             client,
-            cache: HashMap::new(),
+            cache: RwLock::new(HashMap::new()),
             ttl,
         }
     }
@@ -153,28 +154,40 @@ impl OsvClient {
     /// response.  Callers should use the enforcement mode to decide whether
     /// to deny (enforce) or allow-with-warning (audit) the package.
     pub async fn query(
-        &mut self,
+        &self,
         ecosystem: &str,
         package: &str,
         version: &str,
     ) -> Result<Vec<Vulnerability>, OsvQueryError> {
         let cache_key = format!("{ecosystem}/{package}/{version}");
 
-        // Check cache — evict expired entries eagerly to bound memory growth.
-        let expired = self
-            .cache
-            .get(&cache_key)
-            .map(|(cached_at, _)| cached_at.elapsed() >= self.ttl);
-        match expired {
-            Some(false) => {
-                let vulns = &self.cache[&cache_key].1;
-                debug!(cache_key = %cache_key, count = vulns.len(), "OSV cache hit");
-                return Ok(vulns.clone());
+        // Check cache first. Keep the lock only for map access so outbound OSV
+        // requests do not serialize unrelated tunnel traffic.
+        {
+            let cache = self
+                .cache
+                .read()
+                .expect("OSV cache read lock poisoned");
+            if let Some((cached_at, vulns)) = cache.get(&cache_key) {
+                if cached_at.elapsed() < self.ttl {
+                    debug!(cache_key = %cache_key, count = vulns.len(), "OSV cache hit");
+                    return Ok(vulns.clone());
+                }
             }
-            Some(true) => {
-                self.cache.remove(&cache_key);
+        }
+
+        // Best-effort eager eviction for expired entries.
+        {
+            let mut cache = self
+                .cache
+                .write()
+                .expect("OSV cache write lock poisoned");
+            if cache
+                .get(&cache_key)
+                .is_some_and(|(cached_at, _)| cached_at.elapsed() >= self.ttl)
+            {
+                cache.remove(&cache_key);
             }
-            None => {}
         }
 
         // Query OSV API.
@@ -221,7 +234,10 @@ impl OsvClient {
         );
 
         let vulns = parsed.vulns;
-        self.cache.insert(cache_key, (Instant::now(), vulns.clone()));
+        self.cache
+            .write()
+            .expect("OSV cache write lock poisoned")
+            .insert(cache_key, (Instant::now(), vulns.clone()));
         Ok(vulns)
     }
 
@@ -243,6 +259,21 @@ impl OsvClient {
         }
 
         (critical, high, medium, low)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn seed_cache(
+        &self,
+        ecosystem: &str,
+        package: &str,
+        version: &str,
+        vulns: Vec<Vulnerability>,
+    ) {
+        let cache_key = format!("{ecosystem}/{package}/{version}");
+        self.cache
+            .write()
+            .expect("OSV cache write lock poisoned")
+            .insert(cache_key, (Instant::now(), vulns));
     }
 }
 
@@ -378,6 +409,23 @@ fn parse_cvss_base_score(vector: &str) -> Option<f32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn query_returns_seeded_cache_entry() {
+        let client = OsvClient::new(Duration::from_secs(60));
+        let cached = vec![Vulnerability {
+            id: "OSV-1".into(),
+            summary: "cached".into(),
+            severity: vec![],
+            affected: vec![],
+            database_specific: None,
+        }];
+        client.seed_cache("npm", "left-pad", "1.0.0", cached.clone());
+
+        let result = client.query("npm", "left-pad", "1.0.0").await.unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].id, cached[0].id);
+    }
 
     #[test]
     fn classify_critical() {

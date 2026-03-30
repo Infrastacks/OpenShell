@@ -11,9 +11,10 @@ use crate::policy::ProxyPolicy;
 use crate::secrets::{SecretResolver, rewrite_header_line};
 use miette::{IntoDiagnostic, Result};
 use std::net::{IpAddr, SocketAddr};
-use std::path::PathBuf;
-use std::sync::Arc;
+use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 use std::sync::atomic::AtomicU32;
+use std::time::SystemTime;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
@@ -110,6 +111,99 @@ impl InferenceContext {
     }
 }
 
+#[derive(Default)]
+struct SupplyChainRuntimeState {
+    last_mtime: Option<SystemTime>,
+    engine: Option<Arc<openshell_supply_chain::SupplyChainEngine>>,
+}
+
+struct SharedSupplyChainRuntime {
+    policy_path: PathBuf,
+    state: Mutex<SupplyChainRuntimeState>,
+}
+
+impl SharedSupplyChainRuntime {
+    fn from_env() -> Self {
+        let path = std::env::var("SUPPLY_CHAIN_POLICY_PATH")
+            .unwrap_or_else(|_| "/sandbox/.nemoclaw/supply-chain-policy.yaml".into());
+        Self::new(PathBuf::from(path))
+    }
+
+    fn new(policy_path: PathBuf) -> Self {
+        let last_mtime = std::fs::metadata(&policy_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let engine = match Self::load_engine(&policy_path) {
+            Ok(engine) => engine.map(Arc::new),
+            Err(error) => {
+                warn!(
+                    path = %policy_path.display(),
+                    error = %error,
+                    "Failed to initialize supply chain runtime, starting disabled"
+                );
+                None
+            }
+        };
+        Self {
+            policy_path,
+            state: Mutex::new(SupplyChainRuntimeState { last_mtime, engine }),
+        }
+    }
+
+    fn engine_for_tunnel(&self) -> Option<Arc<openshell_supply_chain::SupplyChainEngine>> {
+        let current_mtime = std::fs::metadata(&self.policy_path)
+            .ok()
+            .and_then(|m| m.modified().ok());
+        let mut state = self
+            .state
+            .lock()
+            .expect("supply chain runtime mutex poisoned");
+
+        if state.last_mtime != current_mtime {
+            match Self::load_engine(&self.policy_path) {
+                Ok(engine) => {
+                    state.engine = engine.map(Arc::new);
+                    state.last_mtime = current_mtime;
+                    debug!(
+                        path = %self.policy_path.display(),
+                        enabled = state.engine.is_some(),
+                        "Supply chain runtime reloaded"
+                    );
+                }
+                Err(error) => {
+                    state.last_mtime = current_mtime;
+                    warn!(
+                        path = %self.policy_path.display(),
+                        error = %error,
+                        "Failed to reload supply chain runtime, keeping last known good engine"
+                    );
+                }
+            }
+        }
+
+        state.engine.clone()
+    }
+
+    fn load_engine(
+        path: &Path,
+    ) -> std::result::Result<Option<openshell_supply_chain::SupplyChainEngine>, String> {
+        if !path.exists() {
+            return Ok(None);
+        }
+
+        let yaml = std::fs::read_to_string(path)
+            .map_err(|e| format!("read {}: {e}", path.display()))?;
+        match openshell_policy::parse_supply_chain_policy(&yaml) {
+            Ok(Some(def)) => {
+                let policy = supply_chain_policy_from_def(&def);
+                Ok(Some(openshell_supply_chain::SupplyChainEngine::new(&policy)))
+            }
+            Ok(None) => Ok(None),
+            Err(e) => Err(format!("parse supply chain policy: {e}")),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub struct ProxyHandle {
     #[allow(dead_code)]
@@ -154,6 +248,7 @@ impl ProxyHandle {
         let listener = socket.listen(1024).into_diagnostic()?;
         let local_addr = listener.local_addr().into_diagnostic()?;
         info!(addr = %local_addr, "Proxy listening (tcp)");
+        let supply_chain_runtime = Arc::new(SharedSupplyChainRuntime::from_env());
 
         let join = tokio::spawn(async move {
             loop {
@@ -166,9 +261,10 @@ impl ProxyHandle {
                         let inf = inference_ctx.clone();
                         let resolver = secret_resolver.clone();
                         let dtx = denial_tx.clone();
+                        let supply_chain = supply_chain_runtime.clone();
                         tokio::spawn(async move {
                             if let Err(err) = handle_tcp_connection(
-                                stream, opa, cache, spid, tls, inf, resolver, dtx,
+                                stream, opa, cache, spid, tls, inf, resolver, dtx, supply_chain,
                             )
                             .await
                             {
@@ -269,6 +365,7 @@ async fn handle_tcp_connection(
     inference_ctx: Option<Arc<InferenceContext>>,
     secret_resolver: Option<Arc<SecretResolver>>,
     denial_tx: Option<mpsc::UnboundedSender<DenialEvent>>,
+    supply_chain_runtime: Arc<SharedSupplyChainRuntime>,
 ) -> Result<()> {
     let mut buf = vec![0u8; MAX_HEADER_BYTES];
     let mut used = 0usize;
@@ -561,35 +658,7 @@ async fn handle_tcp_connection(
                 let policy = pii_policy_from_def(&def);
                 openshell_pii::PiiEngine::new(&policy)
             }),
-            supply_chain_engine: {
-                let sc_path = std::env::var("SUPPLY_CHAIN_POLICY_PATH")
-                    .unwrap_or_else(|_| "/sandbox/.nemoclaw/supply-chain-policy.yaml".into());
-                let sc_path = std::path::Path::new(&sc_path);
-                if sc_path.exists() {
-                    match std::fs::read_to_string(sc_path) {
-                        Ok(yaml) => match openshell_policy::parse_supply_chain_policy(&yaml) {
-                            Ok(Some(def)) => {
-                                let policy = supply_chain_policy_from_def(&def);
-                                Some(openshell_supply_chain::SupplyChainEngine::new(&policy))
-                            }
-                            Ok(None) => {
-                                tracing::debug!("No supply_chain section in policy YAML");
-                                None
-                            }
-                            Err(e) => {
-                                tracing::warn!(error = %e, "Failed to parse supply chain policy");
-                                None
-                            }
-                        },
-                        Err(e) => {
-                            tracing::warn!(path = %sc_path.display(), error = %e, "Failed to read supply chain policy");
-                            None
-                        }
-                    }
-                } else {
-                    None
-                }
-            },
+            supply_chain_engine: supply_chain_runtime.engine_for_tunnel(),
             events_path: {
                 let p = std::env::var("OPENSHELL_EVENTS_PATH")
                     .unwrap_or_else(|_| "/sandbox/.nemoclaw/events.jsonl".into());
@@ -612,7 +681,7 @@ async fn handle_tcp_connection(
                     // No protocol detection needed — ALPN proves HTTP
                     crate::l7::relay::relay_with_inspection(
                         &l7_config,
-                        std::sync::Mutex::new(tunnel_engine),
+                        Mutex::new(tunnel_engine),
                         &mut tls_client,
                         &mut tls_upstream,
                         &mut ctx,
@@ -668,7 +737,7 @@ async fn handle_tcp_connection(
             }
             if let Err(e) = crate::l7::relay::relay_with_inspection(
                 &l7_config,
-                std::sync::Mutex::new(tunnel_engine),
+                Mutex::new(tunnel_engine),
                 &mut client,
                 &mut upstream,
                 &mut ctx,
@@ -2005,6 +2074,104 @@ fn supply_chain_policy_from_def(
 mod tests {
     use super::*;
     use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+    use tempfile::tempdir;
+
+    const SUPPLY_CHAIN_POLICY_YAML: &str = r#"
+version: 1
+supply_chain:
+  enforcement: enforce
+  vulnerability_thresholds:
+    max_critical: 0
+    max_high: 5
+    block_unfixed_critical: false
+"#;
+
+    fn write_policy_file(path: &Path, contents: &str) {
+        std::fs::write(path, contents).unwrap();
+    }
+
+    fn rewrite_policy_with_new_mtime(path: &Path, contents: &str, previous: Option<SystemTime>) {
+        for _ in 0..10 {
+            write_policy_file(path, contents);
+            let current = std::fs::metadata(path).ok().and_then(|m| m.modified().ok());
+            if current != previous {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(25));
+        }
+        panic!("policy file mtime did not change");
+    }
+
+    #[test]
+    fn shared_supply_chain_runtime_initial_load_builds_engine() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("supply-chain.yaml");
+        write_policy_file(&policy_path, SUPPLY_CHAIN_POLICY_YAML);
+
+        let runtime = SharedSupplyChainRuntime::new(policy_path);
+        assert!(runtime.engine_for_tunnel().is_some());
+    }
+
+    #[test]
+    fn shared_supply_chain_runtime_reuses_engine_across_tunnels() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("supply-chain.yaml");
+        write_policy_file(&policy_path, SUPPLY_CHAIN_POLICY_YAML);
+
+        let runtime = SharedSupplyChainRuntime::new(policy_path);
+        let first = runtime.engine_for_tunnel().unwrap();
+        let second = runtime.engine_for_tunnel().unwrap();
+
+        assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn shared_supply_chain_runtime_reloads_on_policy_change() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("supply-chain.yaml");
+        write_policy_file(&policy_path, SUPPLY_CHAIN_POLICY_YAML);
+
+        let runtime = SharedSupplyChainRuntime::new(policy_path.clone());
+        let first = runtime.engine_for_tunnel().unwrap();
+        let previous = std::fs::metadata(&policy_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        rewrite_policy_with_new_mtime(
+            &policy_path,
+            r#"
+version: 1
+supply_chain:
+  enforcement: audit
+  vulnerability_thresholds:
+    max_critical: 0
+    max_high: 1
+    block_unfixed_critical: false
+"#,
+            Some(previous),
+        );
+
+        let second = runtime.engine_for_tunnel().unwrap();
+        assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn shared_supply_chain_runtime_keeps_last_known_good_on_invalid_update() {
+        let dir = tempdir().unwrap();
+        let policy_path = dir.path().join("supply-chain.yaml");
+        write_policy_file(&policy_path, SUPPLY_CHAIN_POLICY_YAML);
+
+        let runtime = SharedSupplyChainRuntime::new(policy_path.clone());
+        let first = runtime.engine_for_tunnel().unwrap();
+        let previous = std::fs::metadata(&policy_path)
+            .unwrap()
+            .modified()
+            .unwrap();
+        rewrite_policy_with_new_mtime(&policy_path, "not: [valid", Some(previous));
+
+        let second = runtime.engine_for_tunnel().unwrap();
+        assert!(Arc::ptr_eq(&first, &second));
+    }
 
     // -- is_internal_ip: IPv4 --
 

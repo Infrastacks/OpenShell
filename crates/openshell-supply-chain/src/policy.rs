@@ -141,7 +141,7 @@ impl SupplyChainEngine {
     /// 3. License check (requires package metadata — skipped if unknown)
     /// 4. OSV vulnerability lookup
     /// 5. Threshold evaluation
-    pub async fn evaluate(&mut self, registry_match: &RegistryMatch) -> SupplyChainResult {
+    pub async fn evaluate(&self, registry_match: &RegistryMatch) -> SupplyChainResult {
         let ecosystem = registry_match.ecosystem.to_string();
         let package = &registry_match.package;
         let version_str = &registry_match.version;
@@ -300,11 +300,68 @@ impl SupplyChainEngine {
             vulnerabilities: vuln_details,
         }
     }
+
+    #[cfg(test)]
+    pub(crate) fn seed_osv_cache(
+        &self,
+        ecosystem: &str,
+        package: &str,
+        version: &str,
+        vulns: Vec<crate::osv_client::Vulnerability>,
+    ) {
+        self.osv.seed_cache(ecosystem, package, version, vulns);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::registry::Ecosystem;
+    use crate::Vulnerability;
+
+    #[tokio::test]
+    async fn evaluate_uses_seeded_osv_cache() {
+        let policy = SupplyChainPolicy {
+            enforcement: "enforce".to_string(),
+            vulnerability_thresholds: VulnThresholds {
+                max_critical: 0,
+                max_high: 5,
+                block_unfixed_critical: false,
+            },
+            license_policy: LicensePolicy::default(),
+            denylist: Vec::new(),
+            version_pinning: Vec::new(),
+            osv_cache_ttl_hours: 1,
+        };
+        let engine = SupplyChainEngine::new(&policy);
+        engine.seed_osv_cache(
+            "npm",
+            "left-pad",
+            "1.0.0",
+            vec![Vulnerability {
+                id: "OSV-2026-1".into(),
+                summary: "critical".into(),
+                severity: vec![crate::osv_client::OsvSeverity {
+                    severity_type: "CVSS_V3".into(),
+                    score: "9.8".into(),
+                }],
+                affected: vec![],
+                database_specific: None,
+            }],
+        );
+
+        let result = engine
+            .evaluate(&RegistryMatch {
+                ecosystem: Ecosystem::Npm,
+                package: "left-pad".into(),
+                version: "1.0.0".into(),
+            })
+            .await;
+
+        assert_eq!(result.decision, Decision::Deny);
+        assert_eq!(result.vuln_counts.critical, 1);
+        assert_eq!(result.vulnerabilities.len(), 1);
+    }
 
     #[test]
     fn serde_round_trip() {

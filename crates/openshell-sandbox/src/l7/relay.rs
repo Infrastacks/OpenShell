@@ -35,7 +35,7 @@ pub struct L7EvalContext {
     /// PII detection engine (None = PII scanning disabled).
     pub pii_engine: Option<openshell_pii::PiiEngine>,
     /// Supply chain engine (None = supply chain scanning disabled).
-    pub supply_chain_engine: Option<openshell_supply_chain::SupplyChainEngine>,
+    pub supply_chain_engine: Option<Arc<openshell_supply_chain::SupplyChainEngine>>,
     /// Path to events.jsonl for emitting telemetry events (shared with PII proxy + agent tailer).
     pub events_path: Option<PathBuf>,
 }
@@ -113,7 +113,7 @@ where
         };
 
         // --- Supply chain check (URL-based, before OPA eval) ---
-        if let Some(sc_engine) = ctx.supply_chain_engine.as_mut() {
+        if let Some(sc_engine) = ctx.supply_chain_engine.as_ref() {
             if let Some(registry_match) =
                 openshell_supply_chain::detect_registry_pattern(&ctx.host, &req.target)
             {
